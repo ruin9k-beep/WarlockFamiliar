@@ -1,0 +1,10 @@
+## Interface: 11200
+## Title: WarlockFamiliar
+## Notes: Modular quality-of-life toolkit for Warlocks: Pet Manager and Buff Manager. Use /wf
+## Author: You
+## Version: 1.0
+## SavedVariables: WarlockFamiliarDB
+
+Core.lua
+Modules\PetManager.lua
+Modules\BuffManager.lua
