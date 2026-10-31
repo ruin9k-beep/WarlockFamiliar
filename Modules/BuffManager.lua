@@ -809,6 +809,31 @@ function M:UpdateStatusIcons(active)
                             self.entries and self.entries["Demon Armor"]))
   end
 
+  -- Healthstones in your bags: green with the count when one is ready,
+  -- red with the cooldown when they are all cooling down, red "0" when none
+  local createHS = BestSpell("Create Healthstone")
+  local hs = self.res and self.res[1]
+  if not hs or (hs.count == 0 and not createHS) then
+    WF:SetStatusIconShown(self.indHS, false)
+  else
+    WF:SetStatusIconShown(self.indHS, true)
+    local cd = 0
+    if hs.cdEnd then cd = hs.cdEnd - GetTime() end
+    local text, ready
+    if hs.count > 0 and cd <= 0 then
+      text, ready = tostring(hs.count), true
+    elseif hs.count > 0 then
+      text, ready = WF.FormatTime(cd), false
+    else
+      text, ready = "0", false
+    end
+    local tip = "Healthstones: " .. hs.count
+    if hs.count > 0 and cd > 0 then tip = tip .. " (cooldown " .. WF.FormatTime(cd) .. ")" end
+    if createHS then tip = tip .. "\nClick to create: " .. createHS end
+    if WF:GetSpellIndex(ROS_SPELL) then tip = tip .. "\nRight-click to cast " .. ROS_SPELL end
+    self.indHS:Set(ready, text, hs.tex or SpellIcon(createHS), tip)
+  end
+
   -- the demon you have out (and remember it: this survives a Demonic Sacrifice)
   local aliveDemon = nil
   if UnitExists("pet") and not UnitIsDead("pet") then
@@ -954,7 +979,10 @@ function M:UpdateStatusIcons(active)
     if shardSlots > 0 then
       if shardSlots == 1 then tip = tip .. " in 1 slot" else tip = tip .. " in " .. shardSlots .. " slots" end
     end
-    if shards > 0 then tip = tip .. "\nRight-click to delete a stack (outside soul bags first, smallest first)" end
+    if shards > 0 then
+      tip = tip .. "\nRight-click to delete a stack (outside soul bags first, smallest first)"
+      tip = tip .. "\nShift-right-click to delete ALL shards outside soul bags"
+    end
     self.indShard:Set(shards > 0, tostring(shards), tex, tip)
   end
 end
@@ -1431,6 +1459,7 @@ function M:OnLoad()
   self.indDA = WF:CreateStatusIcon("Demon Armor")
   self.indSac = WF:CreateStatusIcon("Sacrifice")
   self.indStone = WF:CreateStatusIcon("Stone")
+  self.indHS = WF:CreateStatusIcon("Healthstone")
   self.indShard = WF:CreateStatusIcon("Soul Shards")
 
   -- Demon Armor and the latest stone act like their lines in the list.
@@ -1438,11 +1467,17 @@ function M:OnLoad()
   -- recent demon, right-click casts Demonic Sacrifice.
   self.indSac.onClick = function(mouse) M:SacClick(mouse) end
   self.indDA.onClick = function(mouse) M:IndicatorClick("Demon Armor", mouse) end
+  -- Healthstone icon: left-click creates one (highest rank), right-click
+  -- casts Ritual of Souls
+  self.indHS.onClick = function(mouse) M:HealthstoneClick(mouse) end
   self.indStone.onClick = function(mouse) M:IndicatorClick(M.stoneKey, mouse) end
 
   -- right-click the Soul Shard icon to delete a stack of shards
+  -- (shift-right-click: delete ALL shards that are outside soul bags)
   self.indShard.onClick = function(mouse)
-    if mouse == "RightButton" then M:DeleteShardStack() end
+    if mouse == "RightButton" then
+      if IsShiftKeyDown() then M:DeleteLooseShards() else M:DeleteShardStack() end
+    end
   end
 
   local f = WF:CreateWindow(self, 0, 54)
@@ -1657,6 +1692,26 @@ end
 -- A header status icon behaves like the matching line in the list: the same
 -- left-click and right-click actions. Shift-click is not forwarded, so
 -- shift-clicking a header icon never moves a line between the lists.
+-- Healthstone header icon: left-click casts the highest rank of Create
+-- Healthstone, right-click casts Ritual of Souls
+function M:HealthstoneClick(mouse)
+  if mouse == "RightButton" then
+    if WF:GetSpellIndex(ROS_SPELL) then
+      CastKnown(ROS_SPELL)
+    else
+      WF:Print("You have not learned " .. ROS_SPELL .. ".")
+    end
+    return
+  end
+
+  local spell = BestSpell("Create Healthstone")
+  if spell then
+    CastKnown(spell)
+  else
+    WF:Print("You have not learned Create Healthstone.")
+  end
+end
+
 function M:IndicatorClick(key, mouse)
   local e = key and self.entries and self.entries[key]
   if not e then return end
@@ -1731,6 +1786,48 @@ function M:DeleteShardStack()
     WF:Print("Deleted a stack of 1 Soul Shard" .. where .. ".")
   else
     WF:Print("Deleted a stack of " .. s.count .. " Soul Shards" .. where .. ".")
+  end
+end
+
+-- Shift-right-click on the Soul Shard icon: deletes EVERY shard stack that is
+-- outside a soul bag. Shards inside soul bags are never touched.
+function M:DeleteLooseShards()
+  if CursorHasItem() then
+    WF:Print("Your cursor is holding something. Put it down first.")
+    return
+  end
+
+  local soulBag = {}
+  local stacks = {}
+  WF:ForEachBagItem(function(bag, slot, link, count)
+    if WF.ItemIdFromLink(link) == SHARD_ID then
+      if soulBag[bag] == nil then soulBag[bag] = IsSoulBag(bag) end
+      if not soulBag[bag] then
+        table.insert(stacks, { bag = bag, slot = slot, count = count })
+      end
+    end
+  end)
+
+  if table.getn(stacks) == 0 then
+    WF:Print("You have no Soul Shards outside your soul bags.")
+    return
+  end
+
+  local deleted, shards = 0, 0
+  for i = 1, table.getn(stacks) do
+    local s = stacks[i]
+    PickupContainerItem(s.bag, s.slot)
+    if not CursorHasItem() then break end   -- the pickup failed: stop here
+    DeleteCursorItem()
+    deleted = deleted + 1
+    shards = shards + s.count
+  end
+
+  if shards == 1 then
+    WF:Print("Deleted 1 Soul Shard from outside your soul bags.")
+  else
+    WF:Print("Deleted " .. shards .. " Soul Shards (" .. deleted .. " stack" ..
+             (deleted == 1 and "" or "s") .. ") from outside your soul bags.")
   end
 end
 
@@ -1859,6 +1956,7 @@ function M:OnDisable()
   self.prevStone = nil
   if self.indDA then
     WF:SetStatusIconShown(self.indDA, false)
+    WF:SetStatusIconShown(self.indHS, false)
     WF:SetStatusIconShown(self.indSac, false)
     WF:SetStatusIconShown(self.indStone, false)
     WF:SetStatusIconShown(self.indShard, false)

@@ -80,7 +80,7 @@ local MAIN_W = 300    -- width of the main window
 local HEADER_H = 62   -- module buttons (with the close/collapse buttons) + status icon row, above the module content
 local COLLAPSED_PAD = 4  -- extra height under the header when collapsed
 local ICON_H = 18         -- height of the status icon row
-local SLOT_W = 62         -- width of one status icon slot
+local SLOT_W = 52         -- width of one status icon slot (5 fit left of the cog)
 local UNKNOWN_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 -- the Engineering profession icon (a cog); it ships with every 1.12 client
 local OPTIONS_ICON = "Interface\\Icons\\Trade_Engineering"
