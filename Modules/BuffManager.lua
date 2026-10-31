@@ -12,9 +12,11 @@
     * Healthstone  - left-click uses it (if you have one off cooldown),
                      otherwise creates one. Right-click casts Ritual of Souls.
     * Soulstone    - left-click uses it on your friendly target. It NEVER
-                     falls back to yourself: with no friendly target (or with
-                     yourself targeted) nothing is used. Right-click uses it
-                     on yourself. If you have none, left-click creates one.
+                     targets yourself: with no friendly player target (or with
+                     yourself targeted) nothing is used. There is no way to
+                     soulstone yourself from this addon. A drop-down on the
+                     line picks a group member; right-click uses the stone
+                     on that player. If you have none, left-click creates one.
     * Spellstone / Firestone - creates one if missing
     * Voidstone / Felstone   - left-click casts the Create spell, right-click
                      uses the item from your bags
@@ -82,8 +84,8 @@ local BUFFS = {
 -- use         = clicking the icon uses the stone from your bags
 -- soul        = use on the friendly target if there is one
 -- rightSpell  = spell cast on right-click (if known)
--- (Soulstone: a normal click needs a friendly target and never falls back
---  to yourself; right-click is the only way to soulstone yourself.)
+-- (Soulstone: a click needs a friendly player target and never targets
+--  yourself; there is no self-soulstone option.)
 -- Healthstone (1) and Soulstone (2) start in the main list; the rest in the extras.
 local STONES = {
   { label = "Healthstone", match = "healthstone", create = "Create Healthstone",
@@ -139,13 +141,22 @@ M.rows = {}
 function M:ScanBuffs()
   local found = {}
   if not self.tip then return found end
+  local superwow = WF.HasSuperWoW() and GetPlayerBuffID ~= nil
   for i = 0, 63 do
     local idx = GetPlayerBuff(i, "HELPFUL")
     if not idx or idx < 0 then break end
-    self.tip:SetOwner(WorldFrame, "ANCHOR_NONE")
-    self.tip:SetPlayerBuff(idx)
-    local fs = getglobal("WarlockFamiliarBuffTipTextLeft1")
-    local name = fs and fs:GetText()
+    local name
+    if superwow then
+      -- SuperWoW: the aura id gives the name directly, no tooltip needed
+      local id = GetPlayerBuffID(idx)
+      if id and id > 0 then name = SpellInfo(id) end
+    end
+    if not name then
+      self.tip:SetOwner(WorldFrame, "ANCHOR_NONE")
+      self.tip:SetPlayerBuff(idx)
+      local fs = getglobal("WarlockFamiliarBuffTipTextLeft1")
+      name = fs and fs:GetText()
+    end
     if name then
       found[string.lower(name)] = {
         left = GetPlayerBuffTimeLeft(idx) or 0,
@@ -289,22 +300,6 @@ local function FindBagItem(match, names)
   return fb, fs
 end
 
--- Uses a bag item on yourself without relying on the "onSelf" argument:
--- temporarily targets yourself, uses the item, answers a pending target
--- cursor, then restores your previous target.
-local function UseOnSelf(bag, slot)
-  local hadTarget = UnitExists("target")
-  local wasSelf = hadTarget and UnitIsUnit("target", "player")
-
-  if not wasSelf then TargetUnit("player") end
-  UseContainerItem(bag, slot)
-  if SpellIsTargeting() then SpellTargetUnit("player") end
-
-  if not wasSelf then
-    if hadTarget then TargetLastTarget() else ClearTarget() end
-  end
-end
-
 ----------------------------------------------------------------------
 -- icon click actions
 ----------------------------------------------------------------------
@@ -334,6 +329,11 @@ local CHECK_DELAY = 4  -- seconds after a raid-buff cast before checking for "RA
 -- Casts `spell` on a specific unit without permanently changing your
 -- target: target it, cast, answer a pending target cursor, restore target.
 local function CastOnUnit(spell, unit)
+  -- SuperWoW: cast straight at the unit, your target is never touched
+  if WF.HasSuperWoW() and not string.find(spell, "(", 1, true) then
+    CastSpellByName(spell, unit)
+    return
+  end
   local hadTarget = UnitExists("target")
   local sameTarget = hadTarget and UnitIsUnit("target", unit)
 
@@ -361,6 +361,31 @@ local function GroupUnits()
   return units
 end
 
+-- sorted names of the other players in your group (never yourself)
+local function GroupNames()
+  local names = {}
+  local units = GroupUnits()
+  for i = 1, table.getn(units) do
+    local u = units[i]
+    if not UnitIsUnit(u, "player") then
+      local n = UnitName(u)
+      if n then table.insert(names, n) end
+    end
+  end
+  table.sort(names)
+  return names
+end
+
+-- the unit id of a group member by name (never yourself), or nil
+local function FindGroupUnit(name)
+  local units = GroupUnits()
+  for i = 1, table.getn(units) do
+    local u = units[i]
+    if not UnitIsUnit(u, "player") and UnitName(u) == name then return u end
+  end
+  return nil
+end
+
 local function PrintRaidBuffed()
   DEFAULT_CHAT_FRAME:AddMessage("|cff40ff40RAID BUFFED|r")
 end
@@ -369,14 +394,19 @@ end
 -- (names come from a hidden tooltip; icons are a fallback)
 function M:ScanUnitBuffs(unit)
   local names, texs = {}, {}
+  local superwow = WF.HasSuperWoW()
   for i = 1, 32 do
-    local tex = UnitBuff(unit, i)
+    local tex, _, id = UnitBuff(unit, i)   -- SuperWoW adds the aura id as 3rd value
     if not tex then break end
     texs[tex] = true
-    self.tip:SetOwner(WorldFrame, "ANCHOR_NONE")
-    self.tip:SetUnitBuff(unit, i)
-    local fs = getglobal("WarlockFamiliarBuffTipTextLeft1")
-    local n = fs and fs:GetText()
+    local n
+    if superwow and id and id > 0 then n = SpellInfo(id) end
+    if not n then
+      self.tip:SetOwner(WorldFrame, "ANCHOR_NONE")
+      self.tip:SetUnitBuff(unit, i)
+      local fs = getglobal("WarlockFamiliarBuffTipTextLeft1")
+      n = fs and fs:GetText()
+    end
     if n then names[string.lower(n)] = true end
   end
   return names, texs
@@ -497,9 +527,13 @@ function M:BuffRaid(b)
       WF:Print("Everyone has " .. b.label .. ".")
     end
   elseif outOfRange > 0 then
-    WF:Print(outOfRange .. " member(s) still need " .. b.label .. " but are out of range.")
+    if outOfRange == 1 then
+      WF:Print("1 member still needs " .. b.label .. " but is out of range.")
+    else
+      WF:Print(outOfRange .. " members still need " .. b.label .. " but are out of range.")
+    end
   else
-    WF:Print("Waiting for " .. b.label .. " casts to land.")
+    WF:Print("Waiting for the " .. b.label .. " casts to land.")
   end
 end
 
@@ -520,7 +554,7 @@ function M:IconClick(btn, mouse)
       -- Healthstone line: Ritual of Souls
       CastKnown(btn.rightSpell)
     elseif btn.rightAction then
-      -- Soulstone: use on yourself; Voidstone / Felstone: use the item
+      -- Voidstone / Felstone: use the item
       self:RunAction(btn.rightAction)
     end
     return
@@ -548,9 +582,34 @@ function M:RunAction(action)
     end
 
     if action.soul then
-      if action.selfUse then
-        -- the ONLY way to soulstone yourself: the explicit right-click action
-        UseOnSelf(bag, slot)
+      if action.toSelected then
+        -- right-click: use it on the player picked in the drop-down.
+        -- Only group members other than yourself can ever be chosen.
+        local name = M.db.soulTarget
+        if not name or name == "" then
+          WF:Print("Pick a player with the Soulstone arrow first.")
+          return
+        end
+        local unit = FindGroupUnit(name)
+        if not unit then
+          WF:Print(name .. " is not in your group.")
+        elseif not UnitIsConnected(unit) or UnitIsDeadOrGhost(unit) then
+          WF:Print(name .. " must be online and alive to be soulstoned.")
+        else
+          local hadTarget = UnitExists("target")
+          local sameTarget = hadTarget and UnitIsUnit("target", unit)
+          if not sameTarget then TargetUnit(unit) end
+          if UnitIsUnit("target", unit) and not UnitIsUnit("target", "player") then
+            UseContainerItem(bag, slot)
+          end
+          -- answer / cancel a pending target cursor, never onto yourself
+          if SpellIsTargeting() then
+            if UnitIsUnit(unit, "player") then SpellStopTargeting() else SpellTargetUnit(unit) end
+          end
+          if not sameTarget then
+            if hadTarget then TargetLastTarget() else ClearTarget() end
+          end
+        end
       elseif UnitExists("target") and UnitIsPlayer("target")
              and UnitIsFriend("player", "target")
              and not UnitIsUnit("target", "player") then
@@ -558,8 +617,8 @@ function M:RunAction(action)
         -- never leave a target cursor hanging that could be clicked onto yourself
         if SpellIsTargeting() then SpellStopTargeting() end
       else
-        -- safety: a normal click never falls back to yourself
-        WF:Print("Target a friendly player first (right-click to soulstone yourself).")
+        -- safety: never falls back to yourself
+        WF:Print("Target a friendly player other than yourself first.")
       end
     elseif action.plain then
       UseContainerItem(bag, slot)
@@ -797,7 +856,7 @@ function M:UpdateStatusIcons(active)
       label = aliveDemon.label
       tex = SpellIcon(aliveDemon.spell) or aliveDemon.icon
       isActive = true
-      tip = aliveDemon.family .. ": out"
+      tip = aliveDemon.family .. " is out"
     elseif sacBuff then
       -- sacrificed: the buff you got (green)
       label = sacFx.label
@@ -813,10 +872,10 @@ function M:UpdateStatusIcons(active)
     end
 
     if not aliveDemon then
-      tip = tip .. "\nClick: summon " .. nextDemon.family
+      tip = tip .. "\nClick to summon " .. nextDemon.family
     end
     if sacKnown then
-      tip = tip .. "\nRight-click: Demonic Sacrifice"
+      tip = tip .. "\nRight-click to cast Demonic Sacrifice"
     end
     self.indSac:Set(isActive, label, tex, tip)
   end
@@ -892,8 +951,10 @@ function M:UpdateStatusIcons(active)
     if shardTex then self.db.shardIcon = shardTex end   -- remember the icon
     local tex = shardTex or self.db.shardIcon or SHARD_ICON
     local tip = "Soul Shards: " .. shards
-    if shardSlots > 0 then tip = tip .. " in " .. shardSlots .. " slot(s)" end
-    if shards > 0 then tip = tip .. "\nRight-click: delete a stack (outside soul bags first, smallest first)" end
+    if shardSlots > 0 then
+      if shardSlots == 1 then tip = tip .. " in 1 slot" else tip = tip .. " in " .. shardSlots .. " slots" end
+    end
+    if shards > 0 then tip = tip .. "\nRight-click to delete a stack (outside soul bags first, smallest first)" end
     self.indShard:Set(shards > 0, tostring(shards), tex, tip)
   end
 end
@@ -991,7 +1052,7 @@ function M:Build(active)
     local rightTip = ""
     if b.raid and castName then
       rightRaid = b
-      rightTip = "\nRight-click: cast on a raid member who lacks it"
+      rightTip = "\nRight-click to buff the next group member who lacks it"
     end
 
     if act then
@@ -1090,10 +1151,14 @@ function M:Build(active)
         if d.use then
           action = { kind = "use", match = d.match, names = d.names, soul = d.soul }
           if d.soul then
-            -- right-click is the only way to soulstone yourself
             rightAction = { kind = "use", match = d.match, names = d.names,
-                            soul = true, selfUse = true }
-            tip = "Click to use on your friendly target\nRight-click to use on yourself"
+                            soul = true, toSelected = true }
+            local sel = M.db.soulTarget
+            if sel and sel ~= "" then
+              tip = "Click to use on your friendly target\nRight-click to use on " .. sel
+            else
+              tip = "Click to use on your friendly target\nRight-click: pick a player with the arrow first"
+            end
           else
             tip = "Click to use"
           end
@@ -1150,7 +1215,7 @@ function M:Build(active)
           Add(items[i], YELLOW .. "CD " .. WF.FormatTime(r.cd) .. suffix .. "|r",
               r.tex, nil, items[i], nil, nil)
         else
-          Add(items[i], GREEN .. "Have" .. suffix .. "|r", r.tex, nil, items[i], nil, nil)
+          Add(items[i], GREEN .. "In bags" .. suffix .. "|r", r.tex, nil, items[i], nil, nil)
         end
       else
         Add(items[i], RED .. "Missing|r", nil, nil, items[i] .. " missing", nil, nil)
@@ -1177,6 +1242,43 @@ function M:Build(active)
 end
 
 -- draws the lines (reads the cache only)
+-- Soulstone player drop-down: the group members (never yourself)
+function M:SoulMenuInit()
+  local info = {}
+  info.text = "(none)"
+  info.value = ""
+  info.checked = (not self.db.soulTarget or self.db.soulTarget == "")
+  info.func = M.SoulMenuPick
+  UIDropDownMenu_AddButton(info)
+
+  local names = GroupNames()
+  for i = 1, table.getn(names) do
+    local item = {}
+    item.text = names[i]
+    item.value = names[i]
+    item.checked = (names[i] == self.db.soulTarget)
+    item.func = M.SoulMenuPick
+    UIDropDownMenu_AddButton(item)
+  end
+end
+
+function M.SoulMenuPick()
+  if this.value == "" then M.db.soulTarget = nil else M.db.soulTarget = this.value end
+  M:UpdateSoulDD()
+  M:Build(M:GetActive())   -- refresh the tooltip text from cached data
+  M:Draw()
+end
+
+function M:UpdateSoulDD()
+  if not self.soulBtn then return end
+  local sel = self.db.soulTarget
+  if sel and sel ~= "" then
+    self.soulBtn.tooltipText = "Soulstone target: " .. sel .. "\nClick to choose another player"
+  else
+    self.soulBtn.tooltipText = "Click to choose the player to soulstone"
+  end
+end
+
 function M:Draw()
   if not self.frame or not self.all then return end
 
@@ -1203,6 +1305,7 @@ function M:Draw()
   -- draw
   local n = table.getn(data)
   if n > MAXROWS then n = MAXROWS end
+  local soulRow = nil
   for i = 1, MAXROWS do
     local row = self.rows[i]
     local d = data[i]
@@ -1212,6 +1315,7 @@ function M:Draw()
       row.spell = d.rowSpell
       row.key = d.key
       row.isTop = d.isTop
+      if d.label == "Soulstone" then soulRow = row end
 
       local ib = row.iconBtn
       ib.tex:SetTexture(d.tex or UNKNOWN_ICON)
@@ -1240,6 +1344,18 @@ function M:Draw()
       ib.rightAction = nil
       ib.key = nil
       row:Hide()
+    end
+  end
+
+  -- the Soulstone player drop-down sits on the Soulstone line (if shown)
+  if self.soulBtn then
+    if soulRow then
+      self.soulBtn:ClearAllPoints()
+      self.soulBtn:SetPoint("LEFT", soulRow.label, "RIGHT", 2, 0)
+      self:UpdateSoulDD()
+      self.soulBtn:Show()
+    else
+      self.soulBtn:Hide()
     end
   end
 
@@ -1333,7 +1449,7 @@ function M:OnLoad()
 
   self.emptyText = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
   self.emptyText:SetPoint("TOP", f, "TOP", 0, -10)
-  self.emptyText:SetText("Nothing to track yet.")
+  self.emptyText:SetText("Nothing to track. Add entries in Options.")
 
   for i = 1, MAXROWS do
     local row = CreateFrame("Button", nil, f)
@@ -1374,6 +1490,28 @@ function M:OnLoad()
     self.rows[i] = row
   end
 
+  -- player picker for the Soulstone line (right-click uses the stone on them)
+  -- the menu itself is never shown as a frame ("MENU" style); a small
+  -- down-arrow button opens it
+  local dd = CreateFrame("Frame", "WarlockFamiliarSoulDropDown", UIParent, "UIDropDownMenuTemplate")
+  UIDropDownMenu_Initialize(dd, function() M:SoulMenuInit() end, "MENU")
+  dd:Hide()
+  self.soulDD = dd
+
+  local arrow = CreateFrame("Button", nil, f)
+  arrow:SetWidth(18)
+  arrow:SetHeight(18)
+  arrow:SetFrameLevel(f:GetFrameLevel() + 8)
+  arrow:SetNormalTexture("Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Up")
+  arrow:SetPushedTexture("Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Down")
+  arrow:SetHighlightTexture("Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Highlight", "ADD")
+  arrow:SetScript("OnClick", function()
+    ToggleDropDownMenu(1, nil, M.soulDD, this, 0, 0)
+  end)
+  WF:SetTooltip(arrow, "")
+  arrow:Hide()
+  self.soulBtn = arrow
+
   -- show/hide the rarely used lines
   self.moreBtn = WF:CreateButton(f, "Show extras", 130, 20)
   self.moreBtn:SetPoint("BOTTOM", f, "BOTTOM", 0, 16)
@@ -1395,7 +1533,7 @@ end
 function M:OptionsTracking(parent, y)
   y = WF:AddHeading(parent, y, "Tracking")
   -- /wf buffs more
-  y = WF:AddCheck(parent, y, "Show extras  (/wf buffs more)",
+  y = WF:AddCheck(parent, y, "Show the extra lines  (/wf buffs more)",
     function() return M.db.showMore end,
     function(on)
       M.db.showMore = on
@@ -1405,7 +1543,7 @@ function M:OptionsTracking(parent, y)
   -- /wf buffs item <name> | buff <name> | remove <name> | list
   local label = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   label:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 4))
-  label:SetText("Track a custom item or buff:")
+  label:SetText("Track a custom item or buff (type its exact name):")
   y = y + 22
 
   local box = WF:AddEditBox(parent, 20, y, 236)
@@ -1447,7 +1585,7 @@ function M:OptionsAnnounce(parent, y)
 
   local rosLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   rosLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 4))
-  rosLabel:SetText("What to say when the cast starts:")
+  rosLabel:SetText("Message in /say when the cast starts:")
   y = y + 22
 
   local rosBox = WF:AddEditBox(parent, 20, y, 256)
@@ -1477,12 +1615,12 @@ function M:OptionsAnnounce(parent, y)
 
   local sumHelp = parent:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
   sumHelp:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 2))
-  sumHelp:SetText("In messages: %t = target name, %z = zone")
+  sumHelp:SetText("Placeholders: %t = target's name, %z = zone")
   y = y + 20
 
   local sayLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   sayLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 4))
-  sayLabel:SetText("/say message:")
+  sayLabel:SetText("Message in /say:")
   y = y + 22
   local sayBox = WF:AddEditBox(parent, 20, y, 256)
   sayBox:SetMaxLetters(200)
@@ -1492,7 +1630,7 @@ function M:OptionsAnnounce(parent, y)
 
   local whLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   whLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 4))
-  whLabel:SetText("Whisper to the target:")
+  whLabel:SetText("Whisper to the summon target:")
   y = y + 22
   local whBox = WF:AddEditBox(parent, 20, y, 256)
   whBox:SetMaxLetters(200)

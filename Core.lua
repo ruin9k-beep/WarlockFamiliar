@@ -87,6 +87,18 @@ local OPTIONS_ICON = "Interface\\Icons\\Trade_Engineering"
 local headerH = HEADER_H  -- header height (fixed)
 
 ----------------------------------------------------------------------
+-- client mods (optional): SuperWoW and Nampower add extra Lua functions.
+-- Everything that uses them keeps a plain 1.12 fallback.
+----------------------------------------------------------------------
+function WF.HasSuperWoW()
+  return SUPERWOW_VERSION ~= nil and SpellInfo ~= nil
+end
+
+function WF.HasNampower()
+  return GetNampowerVersion ~= nil and IsSpellUsable ~= nil
+end
+
+----------------------------------------------------------------------
 -- small utilities
 ----------------------------------------------------------------------
 function WF:Print(msg)
@@ -337,7 +349,7 @@ function WF:BuildMain()
     if WF:CombatLocked() then return end   -- the window is held collapsed in combat
     WF:SetCollapsed(not WF.db.collapsed)
   end)
-  WF:SetTooltip(collapse, "Collapse")
+  WF:SetTooltip(collapse, "Collapse the window")
   f.collapse = collapse
 
   -- options button (a cog icon): right end of the status icon row, in the
@@ -404,14 +416,14 @@ function WF:UpdateCollapseButton()
     b:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
     b:SetPushedTexture("Interface\\Buttons\\UI-PlusButton-Down")
     if self:CombatLocked() then
-      b.tooltipText = "Collapsed during combat"
+      b.tooltipText = "Collapsed while in combat"
     else
-      b.tooltipText = "Expand"
+      b.tooltipText = "Expand the window"
     end
   else
     b:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
     b:SetPushedTexture("Interface\\Buttons\\UI-MinusButton-Down")
-    b.tooltipText = "Collapse to the module bar"
+    b.tooltipText = "Collapse to the header"
   end
 end
 
@@ -701,7 +713,7 @@ function WF:BuildOptions()
   -- (/wf enable <module> | /wf disable <module>)
   AddTab("General", function(page, y)
     y = WF:AddHeading(page, y, "Window")
-    y = WF:AddCheck(page, y, "Collapse in combat",
+    y = WF:AddCheck(page, y, "Collapse the window in combat",
       function() return WF.db.combatCollapse ~= false end,
       function(on)
         WF.db.combatCollapse = on
@@ -717,7 +729,7 @@ function WF:BuildOptions()
       function() return WF.db.hideOnLogin == true end,
       function(on) WF.db.hideOnLogin = on end)
     WF:AddButton(page, 18, y + 2, 116, "Hide window", function() WF:SetMainShown(false) end)
-    WF:AddButton(page, 140, y + 2, 116, "Help in chat", function() WF:PrintHelp() end)
+    WF:AddButton(page, 140, y + 2, 116, "List commands", function() WF:PrintHelp() end)
     y = y + 30
     local note = page:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
     note:SetPoint("TOPLEFT", page, "TOPLEFT", 18, -y)
@@ -833,7 +845,7 @@ function WF:SetMainShown(show)
   self.db.mainShown = show
   self:ApplyMainVisibility()
   if show and self:CombatHidden() then
-    self:Print("the window is hidden during combat and will show when it ends.")
+    self:Print("The window is hidden during combat and will return when it ends.")
   end
 end
 
@@ -1125,7 +1137,7 @@ function WF:Refresh(newLevel)
 
   if active and not announced then
     announced = true
-    self:Print("loaded. Type /wf for commands.")
+    self:Print("Loaded. Type /wf for the command list.")
   end
 end
 
@@ -1134,20 +1146,20 @@ end
 ----------------------------------------------------------------------
 function WF:ModuleStatus(mod)
   if not mod.db.enabled then return "|cff999999disabled|r" end
-  if mod.running then return "|cff40ff40on|r" end
+  if mod.running then return "|cff40ff40enabled|r" end
   return "|cffffd100locked (needs level " .. (mod.minLevel or 1) .. ")|r"
 end
 
 function WF:PrintHelp()
-  self:Print("modules (/wf <module> opens it in the main window):")
+  self:Print("Modules (/wf <module> opens it in the main window):")
   for i = 1, table.getn(self.order) do
     local mod = self.modules[self.order[i]]
     DEFAULT_CHAT_FRAME:AddMessage("  |cffffffff" .. mod.key .. "|r - " .. mod.title .. " [" .. self:ModuleStatus(mod) .. "]")
   end
-  DEFAULT_CHAT_FRAME:AddMessage("  /wf   (alone)   shows the window and opens the options")
-  DEFAULT_CHAT_FRAME:AddMessage("  /wf show | hide | toggle   (the main window)")
-  DEFAULT_CHAT_FRAME:AddMessage("  /wf <module> show | hide | <module commands>")
-  DEFAULT_CHAT_FRAME:AddMessage("  /wf enable <module> | disable <module>")
+  DEFAULT_CHAT_FRAME:AddMessage("  /wf   - show the window and open the options")
+  DEFAULT_CHAT_FRAME:AddMessage("  /wf show | hide | toggle   - the main window")
+  DEFAULT_CHAT_FRAME:AddMessage("  /wf <module> [show | hide]   - open or hide a module (more commands: see the module)")
+  DEFAULT_CHAT_FRAME:AddMessage("  /wf enable | disable <module>   - turn a module on or off")
 end
 
 function WF:RunModuleCommand(key, args)
@@ -1179,7 +1191,7 @@ function WF:HandleSlash(msg)
   local _, _, cmd, rest = string.find(msg or "", "^%s*(%S+)%s*(.*)$")
 
   if not self.active then
-    self:Print("inactive: WarlockFamiliar only runs on Warlock characters.")
+    self:Print("WarlockFamiliar only runs on Warlock characters.")
     return
   end
 
@@ -1207,7 +1219,7 @@ function WF:HandleSlash(msg)
     local key = string.lower(rest or "")
     local mod = self.modules[key]
     if not mod then
-      self:Print("unknown module '" .. key .. "'.")
+      self:Print("Unknown module '" .. key .. "'. Use: " .. table.concat(self.order, ", ") .. ".")
       return
     end
     mod.db.enabled = (cmd == "enable")

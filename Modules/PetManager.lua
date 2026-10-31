@@ -74,11 +74,32 @@ function M:ScanSacrifice()
 end
 
 ----------------------------------------------------------------------
+-- mana cost (1.12 has no spell cost API, so the spellbook tooltip is read)
+----------------------------------------------------------------------
+-- returns the mana cost of the spell at spellbook index `idx`, or 0
+function M:ReadManaCost(idx)
+  if not self.tip then return 0 end
+  self.tip:SetOwner(WorldFrame, "ANCHOR_NONE")
+  self.tip:SetSpell(idx, BOOKTYPE_SPELL)
+  for line = 2, 4 do
+    local fs = getglobal("WarlockFamiliarPetTipTextLeft" .. line)
+    local text = fs and fs:GetText()
+    if text then
+      local _, _, cost = string.find(text, "^(%d+) Mana")
+      if cost then return tonumber(cost) end
+    end
+  end
+  return 0
+end
+
+----------------------------------------------------------------------
 -- refresh
 ----------------------------------------------------------------------
 -- draws from the cached scan data (see M:Scan); no API scanning in here
 function M:Draw()
   if not self.frame or not self.counts then return end
+  self.cost = self.cost or {}
+  self.noMana = self.noMana or {}
 
   local petName, petFamily = self.petName, self.petFamily
   local sac = self.sac
@@ -89,18 +110,18 @@ function M:Draw()
   if petName then
     local text = petName
     if petFamily and petFamily ~= text then text = text .. " (" .. petFamily .. ")" end
-    self.petText:SetText("Current pet: |cffffffff" .. text .. "|r")
+    self.petText:SetText("Demon: |cffffffff" .. text .. "|r")
   else
-    self.petText:SetText("Current pet: |cff999999none|r")
+    self.petText:SetText("Demon: |cff999999none|r")
   end
 
   -- sacrifice buff header
   if sac then
     local t = ""
     if sacLeft > 0 then t = " " .. WF.FormatTime(sacLeft) end
-    self.sacText:SetText("Sacrifice: |cff00ccff" .. sac.buff .. "|r (" .. sac.from .. ")" .. t)
+    self.sacText:SetText("Sacrifice buff: |cff00ccff" .. sac.buff .. "|r (" .. sac.from .. ")" .. t)
   else
-    self.sacText:SetText("Sacrifice: |cff999999none|r")
+    self.sacText:SetText("Sacrifice buff: |cff999999none|r")
   end
 
   local shards = self.counts[SHARD_ID] or 0
@@ -123,10 +144,14 @@ function M:Draw()
       local cd = (self.cdEnd[p.spell] or 0) - GetTime()   -- counts down from the cached end time
       if cd > 0 then
         row.status:SetText("|cffff4040CD " .. WF.FormatTime(cd) .. "|r")
+      elseif self.noMana[p.spell] or (not self.usableApi and (self.cost[p.spell] or 0) > (self.mana or 0)) then
+        row.icon:SetVertexColor(0.45, 0.55, 1)
+        row.name:SetTextColor(0.45, 0.55, 1)
+        row.status:SetText("|cff5080ffNo mana|r")
       elseif p.reagentId and (self.counts[p.reagentId] or 0) == 0 then
         row.status:SetText("|cffff8800No " .. p.reagent .. "|r")
       elseif p.shard and shards == 0 then
-        row.status:SetText("|cffff8800No shard|r")
+        row.status:SetText("|cffff8800No Soul Shard|r")
       elseif petFamily and p.family and petFamily == p.family then
         row.status:SetText("|cff00ccffActive|r")
       else
@@ -154,7 +179,7 @@ function M:Draw()
     elseif sac then
       srow.status:SetText("|cff00ccffActive|r")
     elseif not petName then
-      srow.status:SetText("|cffff8800No pet|r")
+      srow.status:SetText("|cffff8800No demon|r")
     else
       srow.status:SetText("|cff40ff40Ready|r")
     end
@@ -177,10 +202,32 @@ function M:Scan()
       self.cdEnd[PETS[i].spell] = now + WF:GetSpellCooldownLeft(PETS[i].spell)
     end
     self.cdEnd[SAC_SPELL] = now + WF:GetSpellCooldownLeft(SAC_SPELL)
+
+    -- mana costs (they only change with talents/ranks); skipped when
+    -- Nampower can answer "out of mana?" directly
+    self.usableApi = WF.HasNampower()
+    self.cost = {}
+    if not self.usableApi then
+      for i = 1, table.getn(PETS) do
+        local idx = WF:GetSpellIndex(PETS[i].spell)
+        if idx then self.cost[PETS[i].spell] = self:ReadManaCost(idx) end
+      end
+    end
   end
 
   if WF:Due(self, "tFast", 1) or not self.fastDone then
     self.fastDone = true
+
+    self.mana = UnitMana("player")
+
+    -- Nampower: IsSpellUsable(spell) returns usable, outOfMana
+    self.noMana = {}
+    if self.usableApi then
+      for i = 1, table.getn(PETS) do
+        local _, oom = IsSpellUsable(PETS[i].spell)
+        if oom == 1 then self.noMana[PETS[i].spell] = true end
+      end
+    end
 
     local sac, left = self:ScanSacrifice()
     self.sac = sac
@@ -235,7 +282,7 @@ local function MakeRow(parent, index, label, spell, tip)
       WF:Print("You have not learned " .. this.spell .. " yet.")
     end
   end)
-  WF:SetTooltip(row, tip or spell)
+  WF:SetTooltip(row, tip or (spell .. "\nClick to cast"))
 
   return row
 end
@@ -264,8 +311,8 @@ function M:OnLoad()
     self.rows[i] = MakeRow(f, i, p.label, p.spell, p.tip)
   end
 
-  self.sacRow = MakeRow(f, count + 1, "Sacrifice", SAC_SPELL,
-    "Demonic Sacrifice: sacrifices your current demon for a buff. The buff is tracked above.")
+  self.sacRow = MakeRow(f, count + 1, "Demonic Sacrifice", SAC_SPELL,
+    "Demonic Sacrifice: sacrifice your current demon for a buff.\nThe buff you get is shown at the top.")
 
   f:SetScript("OnShow", function() M:Refresh() end)
 end
