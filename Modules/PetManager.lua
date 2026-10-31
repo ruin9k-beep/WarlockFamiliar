@@ -44,7 +44,7 @@ local M = WF:RegisterModule("pets", {
   title = "Pet Manager",
   short = "Pets",
   minLevel = 1,
-  interval = 1,
+  interval = 0.5,
 })
 
 M.rows = {}

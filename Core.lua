@@ -25,7 +25,7 @@
       short    = "Mine",        -- label of the module button
       minLevel = 1,             -- module stays off below this level
       events   = { "BAG_UPDATE" },  -- events delivered to M:OnEvent
-      interval = 1,             -- seconds between M:OnUpdate calls (minimum 1)
+      interval = 0.5,           -- seconds between M:OnUpdate calls (minimum 0.5)
     })
     function M:OnLoad()
       -- build the UI once. This returns the module's CONTENT frame (a child
@@ -1004,10 +1004,10 @@ end)
 updater:SetScript("OnUpdate", function()
   local elapsed = arg1
 
-  -- once a second at most: a combat exemption ran out? if combat is still
+  -- twice a second at most: a combat exemption ran out? if combat is still
   -- on, collapse now
   WF.tickAcc = (WF.tickAcc or 0) + elapsed
-  if WF.tickAcc >= 1 then
+  if WF.tickAcc >= 0.5 then
     WF.tickAcc = 0
     if WF.exemptUntil and GetTime() >= WF.exemptUntil then
       WF.exemptUntil = nil
@@ -1019,9 +1019,10 @@ updater:SetScript("OnUpdate", function()
     local mod = WF.modules[WF.order[i]]
     if mod.running and mod.OnUpdate then
       mod.acc = (mod.acc or 0) + elapsed
-      -- never more often than once a second, whatever the module asks for
-      local interval = mod.interval or 1
-      if interval < 1 then interval = 1 end
+      -- UI checks never run more often than every half second, whatever
+      -- the module asks for (API scans have their own, slower limits)
+      local interval = mod.interval or 0.5
+      if interval < 0.5 then interval = 0.5 end
       if mod.acc >= interval then
         mod.acc = 0
         mod:OnUpdate()

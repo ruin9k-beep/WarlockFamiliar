@@ -52,6 +52,7 @@ local GREEN  = "|cff40ff40"
 local RED    = "|cffff4040"
 local YELLOW = "|cffffd100"
 local GRAY   = "|cff999999"
+local BLUE   = "|cff5080ff"   -- "No mana" (same blue as the Pet Manager)
 
 local UNKNOWN_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 local MAXROWS = 18
@@ -153,7 +154,7 @@ local M = WF:RegisterModule("buffs", {
   title = "Buff Manager",
   short = "Buffs",
   minLevel = 1,
-  interval = 1,
+  interval = 0.5,
   events = { "PLAYER_AURAS_CHANGED", "SPELLCAST_START", "SPELLCAST_CHANNEL_START" },
 })
 
@@ -1050,8 +1051,63 @@ function M:ScanSlow()
   for i = 1, table.getn(items) do self.cres[i] = r[nStones + i] end
   self.shardRes = r[shardIdx]
 
+  self.costCache = nil   -- spell costs are re-read with the bag scan
   self.weapons = self:ScanWeaponStones()
   self:TrackSoulstone()
+end
+
+-- mana cost of a spell, read from its spellbook tooltip (1.12 has no cost
+-- API). Cached until the next two-second bag scan.
+function M:CostOf(spell)
+  self.costCache = self.costCache or {}
+  local c = self.costCache[spell]
+  if c ~= nil then return c end
+  c = 0
+  local idx = WF:GetSpellIndex(spell)
+  if idx and self.tip then
+    self.tip:SetOwner(WorldFrame, "ANCHOR_NONE")
+    self.tip:SetSpell(idx, BOOKTYPE_SPELL)
+    for line = 2, 4 do
+      local fs = getglobal("WarlockFamiliarBuffTipTextLeft" .. line)
+      local text = fs and fs:GetText()
+      if text then
+        local _, _, cost = string.find(text, "^(%d+) Mana")
+        if cost then
+          c = tonumber(cost)
+          break
+        end
+      end
+    end
+  end
+  self.costCache[spell] = c
+  return c
+end
+
+-- true when you have less mana than `spell` costs (a known spell only).
+-- Nampower answers this directly; otherwise the tooltip cost is compared.
+function M:OutOfMana(spell)
+  if not spell or not WF:GetSpellIndex(spell) then return false end
+
+  -- answers are cached for a second, so the API is not called every redraw
+  local now = GetTime()
+  if not self.oomAt or now - self.oomAt >= 1 then
+    self.oomCache = {}
+    self.oomAt = now
+  end
+  local hit = self.oomCache[spell]
+  if hit ~= nil then return hit end
+  local result = self:OutOfManaNow(spell)
+  self.oomCache[spell] = result
+  return result
+end
+
+function M:OutOfManaNow(spell)
+  if WF.HasNampower() and not string.find(spell, "(", 1, true) then
+    local usable, oom = IsSpellUsable(spell)
+    if oom ~= nil then return oom == 1 end
+  end
+  local cost = self:CostOf(spell)
+  return cost > 0 and cost > UnitMana("player")
 end
 
 -- builds the lines from the caches (no API scans in here)
@@ -1070,8 +1126,12 @@ function M:Build(active)
   -- tex: icon, action: icon left-click action, tip: icon tooltip,
   -- rowSpell: (unused now: the text line follows the icon), rightSpell: icon right-click cast,
   -- rightRaid: icon right-click raid buff, rightAction: icon right-click action
+  local pendingNoMana = false   -- set just before Add() for an out-of-mana line
   local function Add(label, status, tex, action, tip, rowSpell, rightSpell, rightRaid, rightAction)
+    local noMana = pendingNoMana
+    pendingNoMana = false
     table.insert(all, {
+      noMana = noMana,
       label = label, status = status, tex = tex, action = action, tip = tip,
       rowSpell = rowSpell, rightSpell = rightSpell, rightRaid = rightRaid,
       rightAction = rightAction, key = curKey, defaultTop = curDefault
@@ -1123,6 +1183,10 @@ function M:Build(active)
     elseif castName then
       local status
       if b.optional then status = GRAY .. "Off|r" else status = RED .. "Missing|r" end
+      if self:OutOfMana(castName) then
+        status = BLUE .. "No mana|r"
+        pendingNoMana = true
+      end
       Add(b.label, status, tex, { kind = "cast", spell = castName },
           "Click to cast " .. castName .. rightTip, castName, nil, rightRaid)
     end
@@ -1165,6 +1229,10 @@ function M:Build(active)
         end
       else
         status = RED .. "Missing|r"
+        if self:OutOfMana(createName) then
+          status = BLUE .. "No mana|r"
+          pendingNoMana = true
+        end
       end
 
       local tex = r.tex
@@ -1235,6 +1303,10 @@ function M:Build(active)
       else
         status = RED .. "Missing|r"
         tip = d.label .. " missing"
+        if self:OutOfMana(createName) then
+          status = BLUE .. "No mana|r"
+          pendingNoMana = true
+        end
       end
       if createName then
         action = { kind = "cast", spell = createName }
@@ -1374,6 +1446,13 @@ function M:Draw()
 
       local ib = row.iconBtn
       ib.tex:SetTexture(d.tex or UNKNOWN_ICON)
+      if d.noMana then
+        ib.tex:SetVertexColor(0.45, 0.55, 1)
+        row.label:SetTextColor(0.45, 0.55, 1)
+      else
+        ib.tex:SetVertexColor(1, 1, 1)
+        row.label:SetTextColor(1, 0.82, 0)
+      end
       ib.action = d.action
       ib.rightSpell = d.rightSpell
       ib.rightRaid = d.rightRaid
