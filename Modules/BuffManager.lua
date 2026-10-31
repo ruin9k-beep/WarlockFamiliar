@@ -124,6 +124,31 @@ local function FillSummonText(line, name, zone)
   return line
 end
 
+-- Soulstone announcement: /say and /raid (or /party) when a Soulstone is cast
+-- on a player. In the message  %t  is the target's name,  %s  the SERVER time
+-- now and  %r  the SERVER time the Soulstone is ready again (30 minutes later).
+local SS_CAST = "Soulstone Resurrection"   -- name of the spell the stone casts
+local SS_COOLDOWN_MIN = 30
+local SS_DEFAULT_LINE = "Soulstone on %t at %s server time. Ready again at %r."
+
+-- server time (GetGameTime) plus `addMin` minutes, as "HH:MM"
+local function ServerTimeText(addMin)
+  local h, m = GetGameTime()
+  local total = (h * 60 + m + (addMin or 0))
+  total = math.mod(total, 1440)
+  return string.format("%02d:%02d", math.floor(total / 60), math.mod(total, 60))
+end
+
+-- fills in %t (target), %s (server time now) and %r (server time ready again)
+local function FillSoulText(line, name)
+  local now = ServerTimeText(0)
+  local ready = ServerTimeText(SS_COOLDOWN_MIN)
+  line = string.gsub(line, "%%t", function() return name end)
+  line = string.gsub(line, "%%s", function() return now end)
+  line = string.gsub(line, "%%r", function() return ready end)
+  return line
+end
+
 local M = WF:RegisterModule("buffs", {
   title = "Buff Manager",
   short = "Buffs",
@@ -591,6 +616,7 @@ function M:RunAction(action)
           return
         end
         local unit = FindGroupUnit(name)
+        self.ssPending = { name = name, t = GetTime() }
         if not unit then
           WF:Print(name .. " is not in your group.")
         elseif not UnitIsConnected(unit) or UnitIsDeadOrGhost(unit) then
@@ -613,6 +639,7 @@ function M:RunAction(action)
       elseif UnitExists("target") and UnitIsPlayer("target")
              and UnitIsFriend("player", "target")
              and not UnitIsUnit("target", "player") then
+        self.ssPending = { name = UnitName("target"), t = GetTime() }
         UseContainerItem(bag, slot)
         -- never leave a target cursor hanging that could be clicked onto yourself
         if SpellIsTargeting() then SpellStopTargeting() end
@@ -1561,6 +1588,7 @@ function M:OptionsTabs()
   return {
     { name = "Buffs",    build = function(p, y) return M:OptionsTracking(p, y) end },
     { name = "Announce", build = function(p, y) return M:OptionsAnnounce(p, y) end },
+    { name = "Soulstone", build = function(p, y) return M:OptionsSoulstone(p, y) end },
   }
 end
 
@@ -1608,6 +1636,47 @@ function M:OptionsTracking(parent, y)
     M:OnSlash("list")
   end)
   return y + 8
+end
+
+-- Soulstone tab: the chat announcement when a Soulstone is cast on a player
+function M:OptionsSoulstone(parent, y)
+  y = WF:AddHeading(parent, y, "Soulstone announcement")
+
+  y = WF:AddCheck(parent, y, "Announce in /say",
+    function() return M.db.ssSay ~= false end,
+    function(on) M.db.ssSay = on end)
+  y = WF:AddCheck(parent, y, "Announce in /raid (or /party)",
+    function() return M.db.ssRaid ~= false end,
+    function(on) M.db.ssRaid = on end)
+
+  local help = parent:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+  help:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 4))
+  help:SetWidth(256)
+  help:SetJustifyH("LEFT")
+  help:SetText("Placeholders: %t = target's name, %s = server time now, %r = server time the Soulstone is ready again (30 minutes later)")
+  y = y + 40
+
+  local label = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  label:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 4))
+  label:SetText("Message:")
+  y = y + 22
+
+  local box = WF:AddEditBox(parent, 20, y, 256)
+  box:SetMaxLetters(200)
+  box:SetText(M.db.ssLine or SS_DEFAULT_LINE)
+  box:SetScript("OnTextChanged", function() M.db.ssLine = this:GetText() end)
+  y = y + 28
+
+  WF:AddButton(parent, 18, y, 80, "Reset", function()
+    M.db.ssLine = nil
+    box:SetText(SS_DEFAULT_LINE)
+  end)
+  WF:AddButton(parent, 102, y, 80, "Test /say", function()
+    local line = box:GetText()
+    if line and line ~= "" then SendChatMessage(FillSoulText(line, "Testname"), "SAY") end
+  end)
+  y = y + 30
+  return y
 end
 
 -- Announce tab: what is said when you start a ritual
@@ -1884,6 +1953,42 @@ function M:AnnounceRitual()
   SendChatMessage(line, "SAY")
 end
 
+-- A Soulstone cast started: /say and /raid (or /party when not in a raid) with
+-- the target, the server time and when the stone is ready again. The target is
+-- the player a click here aimed at, else your friendly player target.
+function M:AnnounceSoulstone()
+  local doSay = self.db.ssSay ~= false
+  local doRaid = self.db.ssRaid ~= false
+  if not doSay and not doRaid then return end
+
+  local name
+  local p = self.ssPending
+  if p and GetTime() - p.t < 8 then
+    name = p.name
+  elseif UnitExists("target") and UnitIsPlayer("target") and UnitIsFriend("player", "target")
+         and not UnitIsUnit("target", "player") then
+    name = UnitName("target")
+  end
+  self.ssPending = nil
+  if not name then return end   -- no valid player target: say nothing
+
+  if not WF:Due(self, "tSS", 5) then return end
+
+  local line = self.db.ssLine
+  if line == nil then line = SS_DEFAULT_LINE end
+  if line == "" then return end
+  local text = FillSoulText(line, name)
+
+  if doSay then SendChatMessage(text, "SAY") end
+  if doRaid then
+    if GetNumRaidMembers() > 0 then
+      SendChatMessage(text, "RAID")
+    elseif GetNumPartyMembers() > 0 then
+      SendChatMessage(text, "PARTY")
+    end
+  end
+end
+
 -- Ritual of Summoning started: /say and/or whisper the summon target.
 -- The same target is not announced again within SUM_COOLDOWN seconds.
 -- Nothing happens without a living player target other than yourself.
@@ -1941,6 +2046,8 @@ function M:OnEvent(event, a1, a2)
       self:AnnounceRitual()
     elseif a1 == SUM_SPELL then
       self:AnnounceSummon()
+    elseif a1 == SS_CAST then
+      self:AnnounceSoulstone()
     end
   elseif event == "SPELLCAST_CHANNEL_START" then
     if a2 == ROS_SPELL then
