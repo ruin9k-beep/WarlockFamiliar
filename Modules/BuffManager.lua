@@ -139,7 +139,8 @@ local M = WF:RegisterModule("buffs", {
   short = "Buffs",
   minLevel = 1,
   interval = 0.5,
-  events = { "PLAYER_AURAS_CHANGED", "SPELLCAST_START", "SPELLCAST_CHANNEL_START" },
+  events = { "PLAYER_AURAS_CHANGED", "SPELLCAST_START", "SPELLCAST_CHANNEL_START",
+             "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED" },
 })
 
 M.rows = {}
@@ -678,6 +679,154 @@ function M:TrackSoulstone()
   end
 
   self.lastSoulCount = r.count
+end
+
+----------------------------------------------------------------------
+-- Soulstone ready reminder
+-- When the Soulstone cooldown runs out: a sound plays (even in combat) and,
+-- in a party or raid, a small window asks you to recast the stone and use it
+-- on the player picked with the arrow on the Soulstone line. The window is
+-- hidden while you are in combat and returns when combat ends.
+----------------------------------------------------------------------
+local PROMPT_SOUND = "RaidWarning"
+
+local function InGroup()
+  return GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0
+end
+
+-- seconds of Soulstone cooldown left: the remembered one or the bag item's
+function M:SoulstoneLeft()
+  local left = self:SoulCooldownLeft()
+  local r = self.res and self.res[2]
+  if r and r.cdEnd then
+    local item = r.cdEnd - GetTime()
+    if item > left then left = item end
+  end
+  return left
+end
+
+-- called after every scan: notices the moment the cooldown runs out
+function M:CheckSoulReady()
+  if not self.res then return end
+  if self:SoulstoneLeft() > 0 then
+    self.soulWasCd = true
+    if not self.soulPromptTest then self.soulPrompt = nil end   -- used again: reminder over
+  elseif self.soulWasCd then
+    self.soulWasCd = false
+    if self.db.soulSound ~= false then PlaySound(PROMPT_SOUND) end
+    if self.db.soulPrompt ~= false and InGroup() then self.soulPrompt = true end
+  end
+  self:UpdateSoulPrompt()
+end
+
+function M:BuildSoulPrompt()
+  if self.promptFrame then return end
+  local f = CreateFrame("Frame", "WarlockFamiliarSoulPrompt", UIParent)
+  f:SetWidth(284)
+  f:SetHeight(120)
+  f:SetFrameStrata("DIALOG")
+  f:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 32,
+    insets = { left = 11, right = 12, top = 12, bottom = 11 }
+  })
+  local p = self.db.promptPos
+  if p and p.x and p.y then
+    f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", p.x, p.y)
+  else
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 160)
+  end
+  f:SetMovable(true)
+  f:EnableMouse(true)
+  f:SetClampedToScreen(true)
+  f:RegisterForDrag("LeftButton")
+  f:SetScript("OnDragStart", function() this:StartMoving() end)
+  f:SetScript("OnDragStop", function()
+    this:StopMovingOrSizing()
+    M.db.promptPos = { x = this:GetLeft(), y = this:GetTop() }
+  end)
+
+  local title = f:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+  title:SetPoint("TOP", f, "TOP", 0, -18)
+  title:SetText("Soulstone is ready!")
+
+  f.text = f:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  f.text:SetPoint("TOP", f, "TOP", 0, -40)
+  f.text:SetWidth(240)
+
+  f.createBtn = WF:CreateButton(f, "Recast Soulstone", 120, 22)
+  f.createBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 22)
+  f.createBtn:SetScript("OnClick", function()
+    local spell = BestSpell(STONES[2].create)
+    if spell then CastKnown(spell) end
+  end)
+
+  f.useBtn = WF:CreateButton(f, "Use", 120, 22)
+  f.useBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -20, 22)
+  f.useBtn:SetScript("OnClick", function()
+    local d = STONES[2]
+    M:RunAction({ kind = "use", match = d.match, names = d.names,
+                  soul = true, toSelected = true })
+  end)
+
+  local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+  close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
+  close:SetScript("OnClick", function()
+    M.soulPrompt = nil
+    M.soulPromptTest = nil
+    f:Hide()
+  end)
+
+  f:Hide()
+  self.promptFrame = f
+end
+
+-- shows / hides / refreshes the reminder window (cached data only)
+function M:UpdateSoulPrompt()
+  if not self.soulPrompt then
+    if self.promptFrame and self.promptFrame:IsShown() then self.promptFrame:Hide() end
+    return
+  end
+  if not InGroup() and not self.soulPromptTest then
+    self.soulPrompt = nil            -- you left the group: the reminder is dropped
+    if self.promptFrame then self.promptFrame:Hide() end
+    return
+  end
+  if UnitAffectingCombat("player") then
+    if self.promptFrame and self.promptFrame:IsShown() then self.promptFrame:Hide() end
+    return                            -- hidden in combat; shown again afterwards
+  end
+
+  self:BuildSoulPrompt()
+  local f = self.promptFrame
+  local d = STONES[2]
+  local r = self.res and self.res[2]
+  local count = r and r.count or 0
+  local sel = self.db.soulTarget
+  local hasTarget = sel and sel ~= ""
+  local createName = BestSpell(d.create)
+
+  if not hasTarget then
+    f.text:SetText("Pick a player with the arrow on the Soulstone line in the Buffs window.")
+  elseif count > 0 then
+    f.text:SetText("Use it on |cffffffff" .. sel .. "|r.")
+  else
+    f.text:SetText("Recast it, then use it on |cffffffff" .. sel .. "|r.")
+  end
+
+  if hasTarget then
+    local short = sel
+    if string.len(short) > 10 then short = string.sub(short, 1, 9) .. "." end
+    f.useBtn:SetText("Use on " .. short)
+  else
+    f.useBtn:SetText("Use")
+  end
+
+  if createName and count == 0 then f.createBtn:Enable() else f.createBtn:Disable() end
+  if count > 0 and hasTarget then f.useBtn:Enable() else f.useBtn:Disable() end
+
+  if not f:IsShown() then f:Show() end
 end
 
 ----------------------------------------------------------------------
@@ -1512,6 +1661,7 @@ function M:Scan()
   -- buffs: at most once a second, shared with everything else that needs them
   local active = self:GetActive()
   self:Build(active)
+  self:CheckSoulReady()   -- Soulstone cooldown ran out? sound + reminder window
 
   -- header icons (pet, demon, buffs, shards): at most once a second
   if WF:Due(self, "tIcons", 1) then
@@ -1702,6 +1852,21 @@ end
 
 -- Soulstone tab: the chat announcement when a Soulstone is cast on a player
 function M:OptionsSoulstone(parent, y)
+  y = WF:AddHeading(parent, y, "Soulstone ready reminder")
+  y = WF:AddCheck(parent, y, "Show a reminder window (groups only)",
+    function() return M.db.soulPrompt ~= false end,
+    function(on) M.db.soulPrompt = on end)
+  y = WF:AddCheck(parent, y, "Play a sound when it is ready",
+    function() return M.db.soulSound ~= false end,
+    function(on) M.db.soulSound = on end)
+  WF:AddButton(parent, 18, y + 2, 120, "Test reminder", function()
+    PlaySound(PROMPT_SOUND)
+    M.soulPrompt = true
+    M.soulPromptTest = true
+    M:UpdateSoulPrompt()
+  end)
+  y = y + 34
+
   y = WF:AddHeading(parent, y, "Soulstone announcement")
 
   y = WF:AddCheck(parent, y, "Announce in /say",
@@ -2023,10 +2188,16 @@ function M:OnEvent(event, a1, a2)
     if a2 == ROS_SPELL then
       self:AnnounceRitual()
     end
+  elseif event == "PLAYER_REGEN_DISABLED" or event == "PLAYER_REGEN_ENABLED" then
+    self:UpdateSoulPrompt()   -- the reminder window hides in combat, returns after
   end
 end
 
 function M:OnDisable()
+  self.soulPrompt = nil
+  self.soulPromptTest = nil
+  self.soulWasCd = nil
+  if self.promptFrame then self.promptFrame:Hide() end
   self.sacWas = nil
   self.prevStone = nil
   if self.indDA then
