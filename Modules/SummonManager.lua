@@ -37,7 +37,8 @@ local SHARD_ID = 6265
 local PAGE_SIZE = 10
 local ROW_TOP = 4
 local ROW_H = 18
-local NEAR_YARDS = 40       -- closer than this: no summon needed
+local NEAR_YARDS = 40       -- default radius: closer than this, no summon is needed
+local MIN_YARDS, MAX_YARDS = 5, 200
 local RECENT_SECS = 90      -- a member summoned this recently is skipped by Auto summon
 local SUM_COOLDOWN = 30     -- seconds before the same target is announced again
 local FAIL_SECS = 60        -- Auto summon skips a member whose summon failed for this long
@@ -160,12 +161,17 @@ function M:MakeMember(name, unit, fileName, level, zone, online, dead, myZone)
   m.instance = (not m.sameZone) and IsInstanceZone(m.zone)
 
   if m.online and m.sameZone then
+    local radius = self.db.nearYards or NEAR_YARDS
     local yards = ExactYards(unit)
     if yards then
       m.yards = yards
-      m.near = (yards <= NEAR_YARDS)
+      m.near = (yards <= radius)
     else
-      m.near = CheckInteractDistance(unit, 4) and true or false   -- about 28 yards
+      -- no exact distance: the closest interact check that fits the radius
+      -- (about 10, 11 or 28 yards)
+      local idx = 4
+      if radius <= 10 then idx = 3 elseif radius <= 20 then idx = 2 end
+      m.near = CheckInteractDistance(unit, idx) and true or false
     end
     m.visible = UnitIsVisible(unit) and true or false
   end
@@ -740,6 +746,34 @@ function M:OptionsSummon(parent, y)
   y = WF:AddCheck(parent, y, "Also auto-summon dead members (last)",
     function() return M.db.autoDead == true end,
     function(on) M.db.autoDead = on end)
+
+  -- members closer than this many yards are "Near" and are not summoned
+  local radiusLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  radiusLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 8))
+  radiusLabel:SetText("Skip members closer than (yards):")
+  local radiusBox = WF:AddEditBox(parent, 214, y + 2, 50)
+  radiusBox:SetMaxLetters(3)
+  radiusBox:SetText(tostring(M.db.nearYards or NEAR_YARDS))
+  radiusBox:SetScript("OnTextChanged", function()
+    local n = tonumber(this:GetText())
+    if n then
+      if n < MIN_YARDS then n = MIN_YARDS end
+      if n > MAX_YARDS then n = MAX_YARDS end
+      M.db.nearYards = math.floor(n)
+    end
+  end)
+  radiusBox:SetScript("OnEditFocusLost", function()
+    this:SetText(tostring(M.db.nearYards or NEAR_YARDS))
+  end)
+  y = y + 32
+
+  local radiusHelp = parent:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+  radiusHelp:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -y)
+  radiusHelp:SetWidth(256)
+  radiusHelp:SetJustifyH("LEFT")
+  radiusHelp:SetText("Default " .. NEAR_YARDS .. ", " .. MIN_YARDS .. "-" .. MAX_YARDS ..
+                     ". Exact only with SuperWoW; otherwise about 10, 11 or 28 yards are used.")
+  y = y + 30
 
   y = WF:AddHeading(parent, y + 4, "Announcements")
   y = WF:AddCheck(parent, y, "Announce Ritual of Summoning in /say",

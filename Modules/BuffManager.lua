@@ -713,8 +713,10 @@ function M:CheckSoulReady()
     if not self.soulPromptTest then self.soulPrompt = nil end   -- used again: reminder over
   elseif self.soulWasCd then
     self.soulWasCd = false
-    if self.db.soulSound ~= false then PlaySound(PROMPT_SOUND) end
-    if self.db.soulPrompt ~= false and InGroup() then self.soulPrompt = true end
+    if self.db.soulRemind ~= false then
+      if self.db.soulSound ~= false then PlaySound(PROMPT_SOUND) end
+      if self.db.soulPrompt ~= false and InGroup() then self.soulPrompt = true end
+    end
   end
   self:UpdateSoulPrompt()
 end
@@ -1847,13 +1849,24 @@ function M:OptionsTracking(parent, y)
     end
     M:OnSlash("list")
   end)
-  return y + 8
+  return M:OptionsReminder(parent, y + 8)
 end
 
--- Soulstone tab: the chat announcement when a Soulstone is cast on a player
-function M:OptionsSoulstone(parent, y)
+-- Soulstone ready reminder (on the Buffs tab): a master switch plus the
+-- window and sound switches
+function M:OptionsReminder(parent, y)
   y = WF:AddHeading(parent, y, "Soulstone ready reminder")
-  y = WF:AddCheck(parent, y, "Show a reminder window (groups only)",
+  y = WF:AddCheck(parent, y, "Enable the reminder",
+    function() return M.db.soulRemind ~= false end,
+    function(on)
+      M.db.soulRemind = on
+      if not on then
+        M.soulPrompt = nil
+        M.soulPromptTest = nil
+        M:UpdateSoulPrompt()
+      end
+    end)
+  y = WF:AddCheck(parent, y, "Show the reminder window (groups only)",
     function() return M.db.soulPrompt ~= false end,
     function(on) M.db.soulPrompt = on end)
   y = WF:AddCheck(parent, y, "Play a sound when it is ready",
@@ -1865,8 +1878,11 @@ function M:OptionsSoulstone(parent, y)
     M.soulPromptTest = true
     M:UpdateSoulPrompt()
   end)
-  y = y + 34
+  return y + 34
+end
 
+-- Soulstone tab: the chat announcement when a Soulstone is cast on a player
+function M:OptionsSoulstone(parent, y)
   y = WF:AddHeading(parent, y, "Soulstone announcement")
 
   y = WF:AddCheck(parent, y, "Announce in /say",
