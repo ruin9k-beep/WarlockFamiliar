@@ -314,19 +314,48 @@ end
 ----------------------------------------------------------------------
 -- icon click actions
 ----------------------------------------------------------------------
+-- Global cooldown guard: nothing the Buff Manager does is sent faster than the
+-- GCD. A click is ignored while an earlier cast of ours is less than one GCD
+-- old, or while the spell itself shows a global-cooldown sweep.
+local GCD_SECS = 1.5
+local lastCastAt = 0
+
+local function OnGcd(spell)
+  local now = GetTime()
+  if now - lastCastAt < GCD_SECS then return true end
+  local idx = spell and WF:GetSpellIndex(spell)
+  if idx then
+    local start, duration = GetSpellCooldown(idx, BOOKTYPE_SPELL)
+    if start and start > 0 and duration and duration > 0
+       and duration <= GCD_SECS + 0.1 and start + duration - now > 0 then
+      return true
+    end
+  end
+  return false
+end
+
+-- uses a bag item (the same guard applies)
+local function UseBagItem(bag, slot, onSelf)
+  lastCastAt = GetTime()
+  UseContainerItem(bag, slot, onSelf)
+end
+
 -- CastSpellByName reads "(...)" in a name as a spell RANK, which breaks
 -- ranked-by-name spells such as "Create Soulstone (Major)". Names with
 -- parentheses are therefore cast by spellbook index instead.
 local function CastKnown(name, onSelf)
   if not name then return end
+  if OnGcd(name) then return end
   if string.find(name, "(", 1, true) then
     local idx = WF:GetSpellIndex(name)
     if idx then
+      lastCastAt = GetTime()
       CastSpell(idx, BOOKTYPE_SPELL)
     else
       WF:Print("You have not learned " .. name .. ".")
     end
   else
+    lastCastAt = GetTime()
     CastSpellByName(name, onSelf)
   end
 end
@@ -340,8 +369,10 @@ local CHECK_DELAY = 4  -- seconds after a raid-buff cast before checking for "RA
 -- Casts `spell` on a specific unit without permanently changing your
 -- target: target it, cast, answer a pending target cursor, restore target.
 local function CastOnUnit(spell, unit)
+  if OnGcd(spell) then return end
   -- SuperWoW: cast straight at the unit, your target is never touched
   if WF.HasSuperWoW() and not string.find(spell, "(", 1, true) then
+    lastCastAt = GetTime()
     CastSpellByName(spell, unit)
     return
   end
@@ -586,6 +617,7 @@ function M:RunAction(action)
   if action.kind == "cast" then
     CastKnown(action.spell, 1)
   elseif action.kind == "use" then
+    if OnGcd() then return end
     local bag, slot = FindBagItem(action.match, action.names)
     if not bag then
       WF:Print("Could not find that item in your bags.")
@@ -612,7 +644,7 @@ function M:RunAction(action)
           local sameTarget = hadTarget and UnitIsUnit("target", unit)
           if not sameTarget then TargetUnit(unit) end
           if UnitIsUnit("target", unit) and not UnitIsUnit("target", "player") then
-            UseContainerItem(bag, slot)
+            UseBagItem(bag, slot)
           end
           -- answer / cancel a pending target cursor, never onto yourself
           if SpellIsTargeting() then
@@ -626,7 +658,7 @@ function M:RunAction(action)
              and UnitIsFriend("player", "target")
              and not UnitIsUnit("target", "player") then
         self.ssPending = { name = UnitName("target"), t = GetTime() }
-        UseContainerItem(bag, slot)
+        UseBagItem(bag, slot)
         -- never leave a target cursor hanging that could be clicked onto yourself
         if SpellIsTargeting() then SpellStopTargeting() end
       else
@@ -634,9 +666,9 @@ function M:RunAction(action)
         WF:Print("Target a friendly player other than yourself first.")
       end
     elseif action.plain then
-      UseContainerItem(bag, slot)
+      UseBagItem(bag, slot)
     else
-      UseContainerItem(bag, slot, 1)
+      UseBagItem(bag, slot, 1)
     end
   end
 end
@@ -993,7 +1025,15 @@ function M:UpdateStatusIcons(active)
     local tip = "Healthstones: " .. hs.count
     if hs.count > 0 and cd > 0 then tip = tip .. " (cooldown " .. WF.FormatTime(cd) .. ")" end
     if createHS then tip = tip .. "\nClick to create: " .. createHS end
-    if WF:GetSpellIndex(ROS_SPELL) then tip = tip .. "\nRight-click to cast " .. ROS_SPELL end
+    if WF:GetSpellIndex(ROS_SPELL) then
+      tip = tip .. "\nRight-click to cast " .. ROS_SPELL
+      local rcd = WF:GetSpellCooldownLeft(ROS_SPELL)
+      if rcd > 0 then
+        tip = tip .. "\n" .. ROS_SPELL .. " cooldown: " .. WF.FormatTime(rcd)
+      else
+        tip = tip .. "\n" .. ROS_SPELL .. ": ready"
+      end
+    end
     self.indHS:Set(ready, text, hs.tex or SpellIcon(createHS), tip)
   end
 
