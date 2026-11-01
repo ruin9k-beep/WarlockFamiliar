@@ -8,10 +8,10 @@
 
   Clicking a member in the list targets them; right-clicking summons them.
 
-  Auto summon skips: offline members, members already inside an instance,
-  members who are near you, members you summoned a moment ago and (unless
-  switched on in the options) dead members. It prefers living members in
-  another zone, then living members who are far away in your zone.
+  Dead members can never be summoned, by Auto summon or by hand. Auto summon
+  also skips: offline members, members already inside an instance, members
+  who are near you and members you summoned a moment ago. It prefers living
+  members in another zone, then living members who are far away in your zone.
 
   When a Ritual of Summoning starts, the addon can say a line in /say and
   whisper the target (both editable in the Options panel, with
@@ -290,6 +290,10 @@ function M:CastSummon(m, token)
     WF:Print(m.name .. " is offline.")
     return false
   end
+  if m.dead or UnitIsDeadOrGhost(m.unit) then
+    WF:Print(m.name .. " is dead and cannot be summoned.")
+    return false
+  end
   if self:Busy() then
     WF:Print("A summoning ritual is already in progress.")
     return false
@@ -353,8 +357,8 @@ end
 
 -- who should Auto summon pick? nil when nobody needs a summon.
 -- 1. living members in another zone   2. living members far away in your zone
--- 3. dead members (only when the option is on). Never offline members, members
---    inside an instance, near members or members summoned a moment ago.
+-- Never dead or offline members, members inside an instance, near members or
+-- members summoned a moment ago.
 function M:PickAuto()
   local best, bestKey
   for i = 1, table.getn(self.members) do
@@ -365,8 +369,6 @@ function M:PickAuto()
         tier = 1
       elseif m.state == "far" then
         tier = 2
-      elseif m.state == "dead" and self.db.autoDead and not (m.sameZone and m.near) then
-        tier = 3
       end
     end
     if tier then
@@ -710,7 +712,7 @@ function M:OnLoad()
   local autoBtn = WF:CreateButton(f, "Auto summon", 124, 22)
   autoBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -23, -btnY)
   autoBtn:SetScript("OnClick", function() M:AutoSummon() end)
-  WF:SetTooltip(autoBtn, "Summon the member who most needs it: living members in another zone first, then far away members in your zone.\nSkips offline members, members in instances, near members and members summoned a moment ago.")
+  WF:SetTooltip(autoBtn, "Summon the member who most needs it: living members in another zone first, then far away members in your zone.\nSkips dead and offline members, members in instances, near members and members summoned a moment ago.")
 
   self.info = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
   self.info:SetPoint("TOP", f, "TOP", 0, -(btnY + 28))
@@ -743,10 +745,6 @@ end
 
 function M:OptionsSummon(parent, y)
   y = WF:AddHeading(parent, y, "Auto summon")
-  y = WF:AddCheck(parent, y, "Also auto-summon dead members (last)",
-    function() return M.db.autoDead == true end,
-    function(on) M.db.autoDead = on end)
-
   -- members closer than this many yards are "Near" and are not summoned
   local radiusLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   radiusLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 8))
