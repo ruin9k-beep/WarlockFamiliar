@@ -5,6 +5,7 @@ One window shows one module at a time:
 
 - **Pet Manager** – summon buttons for every demon (including Infernal and Doomguard rituals) and Demonic Sacrifice tracking.
 - **Buff Manager** – Demon Armor, Healthstone, Soulstone, Voidstone/Felstone and other self-buffs, with Ritual of Souls / Ritual of Summoning announcements.
+- **Summon Manager** – paged party/raid list with locations, "Summon target" and "Auto summon" buttons, plus the Ritual of Summoning announcements.
 
 ## Install
 

@@ -24,9 +24,7 @@
   Clicking the TEXT of a line does exactly the same as clicking its icon
   (left-click, right-click and shift-click).
 
-  When you start casting Ritual of Summoning, the addon says a line in /say
-  and whispers your target (each can be switched off; both messages are
-  editable in the Options panel, with %t = target name and %z = zone).
+  (Ritual of Summoning announcements now live in the Summon Manager.)
 
   When you start casting Ritual of Souls, the addon says a line in /say
   (default: asking people to click the portal for healthstones). The line, and
@@ -110,20 +108,6 @@ local STONES = {
 -- Ritual of Souls announcement (in /say when the cast starts)
 local ROS_SPELL = "Ritual of Souls"
 local ROS_DEFAULT_LINE = "Ritual of Souls! Click the portal for free healthstones!"
-
--- Ritual of Summoning announcements: a /say line and a whisper to the target.
--- In both messages  %t  is replaced by the target's name and  %z  by the zone.
-local SUM_SPELL = "Ritual of Summoning"
-local SUM_COOLDOWN = 30   -- seconds before the same target is announced again
-local SUM_DEFAULT_SAY = "Summoning %t! I need 2 more people to click the portal!"
-local SUM_DEFAULT_WHISPER = "I'm summoning you to %z! Accept the summon when the portal is ready."
-
--- fills in %t (target) and %z (zone)
-local function FillSummonText(line, name, zone)
-  line = string.gsub(line, "%%t", function() return name end)
-  line = string.gsub(line, "%%z", function() return zone end)
-  return line
-end
 
 -- Soulstone announcement: /say and /raid (or /party) when a Soulstone is cast
 -- on a player. In the message  %t  is the target's name,  %s  the SERVER time
@@ -1667,7 +1651,6 @@ function M:OptionsTabs()
   return {
     { name = "Buffs",    build = function(p, y) return M:OptionsTracking(p, y) end },
     { name = "Announce", build = function(p, y) return M:OptionsAnnounce(p, y) end },
-    { name = "Soulstone", build = function(p, y) return M:OptionsSoulstone(p, y) end },
   }
 end
 
@@ -1788,53 +1771,8 @@ function M:OptionsAnnounce(parent, y)
   end)
   y = y + 30
 
-  y = WF:AddHeading(parent, y, "Ritual of Summoning")
-  y = WF:AddCheck(parent, y, "Announce Ritual of Summoning in /say",
-    function() return M.db.sumSay ~= false end,
-    function(on) M.db.sumSay = on end)
-  y = WF:AddCheck(parent, y, "Whisper the summon target",
-    function() return M.db.sumWhisper ~= false end,
-    function(on) M.db.sumWhisper = on end)
-
-  local sumHelp = parent:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-  sumHelp:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 2))
-  sumHelp:SetText("Placeholders: %t = target's name, %z = zone")
-  y = y + 20
-
-  local sayLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-  sayLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 4))
-  sayLabel:SetText("Message in /say:")
-  y = y + 22
-  local sayBox = WF:AddEditBox(parent, 20, y, 256)
-  sayBox:SetMaxLetters(200)
-  sayBox:SetText(M.db.sumSayLine or SUM_DEFAULT_SAY)
-  sayBox:SetScript("OnTextChanged", function() M.db.sumSayLine = this:GetText() end)
-  y = y + 28
-
-  local whLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-  whLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 4))
-  whLabel:SetText("Whisper to the summon target:")
-  y = y + 22
-  local whBox = WF:AddEditBox(parent, 20, y, 256)
-  whBox:SetMaxLetters(200)
-  whBox:SetText(M.db.sumWhisperLine or SUM_DEFAULT_WHISPER)
-  whBox:SetScript("OnTextChanged", function() M.db.sumWhisperLine = this:GetText() end)
-  y = y + 28
-
-  WF:AddButton(parent, 18, y, 80, "Reset", function()
-    M.db.sumSayLine = nil
-    M.db.sumWhisperLine = nil
-    sayBox:SetText(SUM_DEFAULT_SAY)
-    whBox:SetText(SUM_DEFAULT_WHISPER)
-  end)
-  WF:AddButton(parent, 102, y, 80, "Test /say", function()
-    local line = sayBox:GetText()
-    if line and line ~= "" then
-      SendChatMessage(FillSummonText(line, "Friend", GetRealZoneText() or ""), "SAY")
-    end
-  end)
-
-  return y + 28
+  -- the Soulstone announcement lives on the same tab
+  return M:OptionsSoulstone(parent, y)
 end
 
 -- A header status icon behaves like the matching line in the list: the same
@@ -2068,51 +2006,6 @@ function M:AnnounceSoulstone()
   end
 end
 
--- Ritual of Summoning started: /say and/or whisper the summon target.
--- The same target is not announced again within SUM_COOLDOWN seconds.
--- Nothing happens without a living player target other than yourself.
-function M:AnnounceSummon()
-  local doSay = self.db.sumSay ~= false
-  local doWhisper = self.db.sumWhisper ~= false
-  if not doSay and not doWhisper then return end
-
-  -- the target of the ritual is whoever you have targeted when it starts;
-  -- no target, a non-player, yourself or a dead target: do nothing at all
-  if not UnitExists("target") or not UnitIsPlayer("target") then return end
-  if UnitIsUnit("target", "player") or UnitIsDeadOrGhost("target") then return end
-  local name = UnitName("target")
-  if not name then return end
-
-  -- 30 second cooldown per target: summoning the same player again inside
-  -- it is not announced; a different target is announced right away
-  local now = GetTime()
-  self.sumLast = self.sumLast or {}
-  local last = self.sumLast[name]
-  if last and now - last < SUM_COOLDOWN then return end
-  for k, t in pairs(self.sumLast) do
-    if now - t >= SUM_COOLDOWN then self.sumLast[k] = nil end
-  end
-  self.sumLast[name] = now
-
-  local zone = GetRealZoneText() or ""
-
-  if doSay then
-    local line = self.db.sumSayLine
-    if line == nil then line = SUM_DEFAULT_SAY end
-    if line ~= "" then
-      SendChatMessage(FillSummonText(line, name, zone), "SAY")
-    end
-  end
-
-  if doWhisper then
-    local line = self.db.sumWhisperLine
-    if line == nil then line = SUM_DEFAULT_WHISPER end
-    if line ~= "" then
-      SendChatMessage(FillSummonText(line, name, zone), "WHISPER", nil, name)
-    end
-  end
-end
-
 function M:OnEvent(event, a1, a2)
   if event == "PLAYER_AURAS_CHANGED" then
     -- look for a freshly applied sacrifice buff (only while none is known to
@@ -2123,16 +2016,12 @@ function M:OnEvent(event, a1, a2)
   elseif event == "SPELLCAST_START" then
     if a1 == ROS_SPELL then
       self:AnnounceRitual()
-    elseif a1 == SUM_SPELL then
-      self:AnnounceSummon()
     elseif a1 == SS_CAST then
       self:AnnounceSoulstone()
     end
   elseif event == "SPELLCAST_CHANNEL_START" then
     if a2 == ROS_SPELL then
       self:AnnounceRitual()
-    elseif a2 == SUM_SPELL then
-      self:AnnounceSummon()
     end
   end
 end
