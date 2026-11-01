@@ -19,8 +19,7 @@
   non-player, yourself, or when there is no target.
 
   Client mods (optional, used automatically when present):
-    SuperWoW  - UnitPosition gives exact distances; CastSpellByName(spell,
-                unit) summons without changing your target
+    SuperWoW  - UnitPosition gives exact distances
     Nampower  - IsSpellUsable tells whether you are out of mana
 
   /wf summon                 show / hide the window
@@ -41,6 +40,13 @@ local ROW_H = 18
 local NEAR_YARDS = 40       -- closer than this: no summon needed
 local RECENT_SECS = 90      -- a member summoned this recently is skipped by Auto summon
 local SUM_COOLDOWN = 30     -- seconds before the same target is announced again
+local FAIL_SECS = 60        -- Auto summon skips a member whose summon failed for this long
+local START_WAIT = 3        -- seconds to wait for a cast to start before calling it failed
+
+-- error texts that are NOT the target's fault (the target is not blamed)
+local NOT_TARGET_ERRORS = { "mana", "not ready", "cooldown", "moving", "already",
+                            "in progress", "reagent", "shard", "busy", "combat",
+                            "stunned", "silenced", "interrupted" }
 
 local DEFAULT_SAY = "Summoning %t! I need 2 more people to click the portal!"
 local DEFAULT_WHISPER = "I'm summoning you to %z! Accept the summon when the portal is ready."
@@ -71,7 +77,7 @@ local INSTANCES = {
 }
 
 -- display order of the list (smaller first) and the status text of each state
-local STATE_ORDER = { away = 1, far = 2, summoning = 3, dead = 4, near = 5, instance = 6, offline = 7 }
+local STATE_ORDER = { away = 1, far = 2, summoning = 3, failed = 4, dead = 5, near = 6, instance = 7, offline = 8 }
 
 local M = WF:RegisterModule("summon", {
   title = "Summon Manager",
@@ -79,12 +85,13 @@ local M = WF:RegisterModule("summon", {
   minLevel = 20,
   interval = 0.5,
   events = { "SPELLCAST_START", "SPELLCAST_CHANNEL_START", "SPELLCAST_CHANNEL_STOP",
-             "SPELLCAST_FAILED", "SPELLCAST_INTERRUPTED" },
+             "SPELLCAST_FAILED", "SPELLCAST_INTERRUPTED", "UI_ERROR_MESSAGE" },
 })
 
 M.rows = {}
 M.page = 1
 M.summoned = {}   -- name -> GetTime() of the last summon cast on them
+M.failed = {}     -- name -> { t = GetTime(), reason = text } of a summon that failed
 
 ----------------------------------------------------------------------
 -- helpers
@@ -165,6 +172,12 @@ function M:MakeMember(name, unit, fileName, level, zone, online, dead, myZone)
 
   local t = self.summoned[name]
   m.recent = (t and GetTime() - t < RECENT_SECS) and true or false
+  local f = self.failed[name]
+  if f and GetTime() - f.t < FAIL_SECS then
+    m.failed = f
+  else
+    self.failed[name] = nil
+  end
 
   if not m.online then
     m.state = "offline"
@@ -176,6 +189,8 @@ function M:MakeMember(name, unit, fileName, level, zone, online, dead, myZone)
     m.state = "near"
   elseif m.recent then
     m.state = "summoning"
+  elseif m.failed then
+    m.state = "failed"          -- the last summon on them failed: skipped for a while
   elseif m.sameZone then
     m.state = "far"
   else
@@ -285,22 +300,31 @@ function M:CastSummon(m, token)
     end
   end
 
-  -- remember who this cast is for (the announcement reads it)
+  -- remember who this cast is for (the announcement reads it), and that we
+  -- are waiting for it to start: if it never does, this member is skipped
   self.pending = { name = m.name, t = GetTime() }
+  self.attempt = { name = m.name, t = GetTime() }
+  self.failed[m.name] = nil
 
-  if WF.HasSuperWoW() then
-    -- SuperWoW: cast straight at the member, your target is never touched
-    CastSpellByName(SUM_SPELL, token or m.unit)
-  else
-    local hadTarget = UnitExists("target")
-    local sameTarget = (token == "target") or (hadTarget and UnitIsUnit("target", m.unit))
-    if not sameTarget then TargetUnit(m.unit) end
-    CastSpellByName(SUM_SPELL)
-    if SpellIsTargeting() then SpellTargetUnit(m.unit) end
-    if not sameTarget then
-      if hadTarget then TargetLastTarget() else ClearTarget() end
+  -- Ritual of Summoning needs the member targeted, and the follow-up after the
+  -- cast needs them to STAY targeted: so they are targeted and the target is
+  -- never cleared or restored afterwards.
+  local hadTarget = UnitExists("target")
+  local sameTarget = (token == "target") or (hadTarget and UnitIsUnit("target", m.unit))
+  if not sameTarget then
+    TargetUnit(m.unit)
+    if UnitName("target") ~= m.name then
+      TargetByName(m.name, true)       -- second try: by name (needs them in view)
+    end
+    if UnitName("target") ~= m.name then
+      -- they cannot be targeted: skip them
+      self:MarkFailed("could not target them")
+      return false
     end
   end
+
+  CastSpellByName(SUM_SPELL)
+  if SpellIsTargeting() then SpellTargetUnit(m.unit) end
   return true
 end
 
@@ -330,7 +354,7 @@ function M:PickAuto()
   for i = 1, table.getn(self.members) do
     local m = self.members[i]
     local tier = nil
-    if not m.recent then
+    if not m.recent and not m.failed then
       if m.state == "away" then
         tier = 1
       elseif m.state == "far" then
@@ -424,16 +448,60 @@ function M:Announce()
   end
 end
 
+-- the cast on self.attempt did not start: remember it and skip that member
+function M:MarkFailed(reason)
+  local a = self.attempt
+  if not a then return end
+  self.attempt = nil
+  self.pending = nil
+  self.failed[a.name] = { t = GetTime(), reason = reason }
+  local why = ""
+  if reason and reason ~= "" then why = ": " .. reason end
+  WF:Print("Could not summon " .. a.name .. why .. ". Auto summon skips them for "
+           .. FAIL_SECS .. " seconds.")
+  self.members = self:ScanGroup()   -- show the new state now
+end
+
+local function IsNotTargetError(msg)
+  local lower = string.lower(msg or "")
+  for i = 1, table.getn(NOT_TARGET_ERRORS) do
+    if string.find(lower, NOT_TARGET_ERRORS[i], 1, true) then return true end
+  end
+  return false
+end
+
+-- called every update: a cast that never started counts as failed
+function M:CheckAttempt()
+  local a = self.attempt
+  if a and GetTime() - a.t > START_WAIT then
+    self:MarkFailed("no response")
+  end
+end
+
 function M:OnEvent(event, a1, a2)
   if event == "SPELLCAST_START" then
     if a1 == SUM_SPELL then
       self.castingAt = GetTime()
+      self.attempt = nil          -- it started: not a failure
       self:Announce()
     end
   elseif event == "SPELLCAST_CHANNEL_START" then
     if a2 == SUM_SPELL then
       self.channeling = GetTime()
+      self.attempt = nil
       self:Announce()
+    end
+  elseif event == "UI_ERROR_MESSAGE" then
+    -- an error right after our click: blame the target unless the text says
+    -- the problem is something else (mana, cooldown, movement...)
+    local a = self.attempt
+    if a and GetTime() - a.t < START_WAIT then
+      if IsNotTargetError(a1) then
+        self.attempt = nil
+        self.pending = nil
+      else
+        self:MarkFailed(a1)
+      end
     end
   elseif event == "SPELLCAST_CHANNEL_STOP" then
     self.channeling = nil
@@ -457,6 +525,7 @@ local function StateText(m)
     return "|cffffd100Far|r"
   end
   if s == "summoning" then return "|cff00ccffSummoning|r" end
+  if s == "failed" then return "|cffff6040Failed|r" end
   if s == "dead" then return "|cffff4040Dead|r" end
   if s == "near" then
     if m.yards then return "|cff40ff40Near " .. math.floor(m.yards + 0.5) .. "y|r" end
@@ -494,6 +563,12 @@ function M:Draw()
       if zone == "" then zone = "Elsewhere" end
       row.zone:SetText(Short(zone, 17))
       row.status:SetText(StateText(m))
+      if m.failed then
+        row.tooltipText = "Left-click: target\nRight-click: summon\nLast summon failed: "
+                          .. (m.failed.reason or "no response")
+      else
+        row.tooltipText = "Left-click: target\nRight-click: summon"
+      end
       if UnitExists("target") and UnitIsUnit("target", m.unit) then
         row.sel:Show()
       else
@@ -638,6 +713,7 @@ function M:OnLoad()
 end
 
 function M:OnUpdate()
+  self:CheckAttempt()
   if self.frame and self.frame:IsVisible() then
     self:Refresh()
   end
@@ -647,6 +723,7 @@ function M:OnDisable()
   self.channeling = nil
   self.castingAt = nil
   self.pending = nil
+  self.attempt = nil
 end
 
 ----------------------------------------------------------------------

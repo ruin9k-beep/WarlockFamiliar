@@ -370,6 +370,23 @@ function WF:BuildMain()
   RestorePosition(f, "main")
   f:Hide()
   self.main = f
+
+  -- Escape collapses the expanded window instead of closing it. The game
+  -- hides every shown frame listed in UISpecialFrames when Escape is pressed,
+  -- so a hidden proxy frame is listed instead of the window. It is shown only
+  -- while the window is open and expanded; when the game hides it, the window
+  -- collapses (see WF:UpdateEscProxy).
+  local proxy = CreateFrame("Frame", "WarlockFamiliarEscProxy", UIParent)
+  proxy:Hide()
+  proxy:SetScript("OnHide", function()
+    if WF.main and WF.main:IsShown() and not WF:IsCollapsed() then
+      WF:SetCollapsed(true)
+    end
+  end)
+  table.insert(UISpecialFrames, "WarlockFamiliarEscProxy")
+  self.escProxy = proxy
+  f:SetScript("OnShow", function() WF:UpdateEscProxy() end)
+  f:SetScript("OnHide", function() WF:UpdateEscProxy() end)
   self.statusIcons = {}
   self:UpdateCollapseButton()
 end
@@ -467,9 +484,22 @@ function WF:CreateWindow(mod, width, height)
   return f
 end
 
+-- the Escape proxy is shown exactly while the window is open and expanded
+function WF:UpdateEscProxy()
+  local proxy = self.escProxy
+  if not proxy then return end
+  local want = self.main and self.main:IsShown() and not self:IsCollapsed()
+  if want and not proxy:IsShown() then
+    proxy:Show()
+  elseif not want and proxy:IsShown() then
+    proxy:Hide()
+  end
+end
+
 function WF:ResizeMain()
   if not self.main then return end
   local m = self.main
+  self:UpdateEscProxy()
   if self:IsCollapsed() then
     -- collapsed: the header fills the window, so no divider (the outer
     -- border is the only bottom edge)
