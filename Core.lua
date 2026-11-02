@@ -367,6 +367,7 @@ function WF:BuildMain()
   f.optBtn = optBtn
 
   f.tabs = {}   -- module key -> module button
+  f:SetScale(WF:GetUIScale())   -- before restoring, positions are in scaled units
   RestorePosition(f, "main")
   f:Hide()
   self.main = f
@@ -661,6 +662,61 @@ function WF:AddCheck(parent, y, label, get, set)
   return y + 24
 end
 
+-- UI scale of the whole window (0.6 - 1.6, default 1)
+function WF:GetUIScale()
+  local s = self.db and self.db.scale
+  if type(s) ~= "number" or s < 0.6 or s > 1.6 then return 1 end
+  return s
+end
+
+-- rescales the window and keeps its top-left corner where it is on screen
+function WF:SetUIScale(s)
+  if s < 0.6 then s = 0.6 end
+  if s > 1.6 then s = 1.6 end
+  s = math.floor(s * 20 + 0.5) / 20
+  local f = self.main
+  self.db.scale = s
+  if not f then return end
+  local old = f:GetScale()
+  if old == s then return end
+  local l, t = f:GetLeft(), f:GetTop()
+  f:SetScale(s)
+  if l and t then
+    f:ClearAllPoints()
+    f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", l * old / s, t * old / s)
+    SavePosition(f, "main")
+  end
+end
+
+-- slider; the label shows the live value, the change is applied on release
+-- (rescaling the window under the cursor mid-drag would make it jump)
+function WF:AddScaleSlider(parent, y)
+  optCount = optCount + 1
+  local name = "WarlockFamiliarOptSlider" .. optCount
+  local sl = CreateFrame("Slider", name, parent, "OptionsSliderTemplate")
+  sl:SetWidth(200)
+  sl:SetHeight(16)
+  sl:SetPoint("TOPLEFT", parent, "TOPLEFT", 22, -(y + 16))
+  sl:SetMinMaxValues(0.6, 1.6)
+  sl:SetValueStep(0.05)
+  getglobal(name .. "Low"):SetText("60%")
+  getglobal(name .. "High"):SetText("160%")
+  local label = getglobal(name .. "Text")
+  local function Show(v) label:SetText("UI scale: " .. math.floor(v * 100 + 0.5) .. "%") end
+  sl:SetValue(self:GetUIScale())
+  Show(self:GetUIScale())
+  sl:SetScript("OnValueChanged", function() Show(this:GetValue()) end)
+  sl:SetScript("OnMouseUp", function() WF:SetUIScale(this:GetValue()) end)
+  local reset = self:CreateButton(parent, "Reset", 60, 20)
+  reset:SetPoint("LEFT", sl, "RIGHT", 14, 0)
+  reset:SetScript("OnClick", function()
+    sl:SetValue(1)
+    WF:SetUIScale(1)
+  end)
+  WF:SetTooltip(sl, "Drag, then release to resize the whole window")
+  return y + 44
+end
+
 function WF:AddButton(parent, x, y, width, label, onClick)
   local b = self:CreateButton(parent, label, width, 22)
   b:SetPoint("TOPLEFT", parent, "TOPLEFT", x, -y)
@@ -743,6 +799,7 @@ function WF:BuildOptions()
   -- (/wf enable <module> | /wf disable <module>)
   AddTab("General", function(page, y)
     y = WF:AddHeading(page, y, "Window")
+    y = WF:AddScaleSlider(page, y)
     y = WF:AddCheck(page, y, "Collapse the window in combat",
       function() return WF.db.combatCollapse ~= false end,
       function(on)
