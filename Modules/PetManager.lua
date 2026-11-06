@@ -1,7 +1,7 @@
 --[[
   Pet Manager
   Lists every demon summon, shows which ones you have learned, and gives a
-  one-click button for each, including the Infernal (Inferno) and Doomguard
+  one-click button for each, including the Felguard (Demon Gate), Infernal (Inferno) and Doomguard
   (Ritual of Doom) rituals.
 
   Also has a Demonic Sacrifice button and tracks the buff you get from
@@ -22,6 +22,9 @@ local PETS = {
   { spell = "Summon Voidwalker", label = "Voidwalker", family = "Voidwalker", shard = true },
   { spell = "Summon Succubus", label = "Succubus", family = "Succubus", shard = true },
   { spell = "Summon Felhunter", label = "Felhunter", family = "Felhunter", shard = true },
+  { spell = "Demon Gate", label = "Felguard", family = "Felguard",
+    reagent = "Demonic Figurine", reagentId = 16583,
+    tip = "Demon Gate: summons a Felguard. Needs a Demonic Figurine." },
   { spell = "Inferno", label = "Infernal", reagent = "Infernal Stone", reagentId = 5565,
     tip = "Inferno: summons an Infernal. Needs an Infernal Stone." },
   { spell = "Ritual of Doom", label = "Doomguard", reagent = "Demonic Figurine", reagentId = 16583,
@@ -290,7 +293,14 @@ end
 function M:OnLoad()
   self.itemIds = { SHARD_ID }
   for i = 1, table.getn(PETS) do
-    if PETS[i].reagentId then table.insert(self.itemIds, PETS[i].reagentId) end
+    local id = PETS[i].reagentId
+    if id then
+      local known = false
+      for j = 1, table.getn(self.itemIds) do
+        if self.itemIds[j] == id then known = true end
+      end
+      if not known then table.insert(self.itemIds, id) end   -- shared reagents are counted once
+    end
   end
 
   local count = table.getn(PETS)
