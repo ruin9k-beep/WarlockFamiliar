@@ -883,6 +883,8 @@ local DEMONS = {
     icon = "Interface\\Icons\\Spell_Shadow_SummonSuccubus" },
   { family = "Felhunter",  spell = "Summon Felhunter",  label = "FH",
     icon = "Interface\\Icons\\Spell_Shadow_SummonFelHunter" },
+  { family = "Felguard",   spell = "Demon Gate",        label = "FG",
+    icon = "Interface\\Icons\\Spell_Shadow_SummonFelGuard" },
 }
 
 -- Soul Shards (item 6265)
