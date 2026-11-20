@@ -6,8 +6,10 @@
     Summon target  - casts Ritual of Summoning on your current target
     Auto summon    - picks the member who most needs a summon and casts it
 
-  123 List       - shows only the members who typed "123" in chat (say, yell,
+  123 List       - shows only the members who typed "123" anywhere in a chat
+                   line (say, yell,
                    party, raid or whisper) in the last 3 minutes, oldest first.
+                   The small x beside a name removes that member from the list.
                    Someone who was out of range or out of zone leaves the list
                    when they come within 60 yards of you. Auto summon picks
                    these members first.
@@ -154,18 +156,9 @@ local function FindUnit(name)
   return nil
 end
 
--- true when a chat line contains "123" as its own number (not part of 1234)
+-- true when a chat line has "123" anywhere in it
 local function HasRequest(msg)
-  if not msg then return false end
-  local init = 1
-  while true do
-    local a, b = string.find(msg, "123", init, true)
-    if not a then return false end
-    local before = a > 1 and string.sub(msg, a - 1, a - 1) or ""
-    local after = string.sub(msg, b + 1, b + 1)
-    if not string.find(before, "%d") and not string.find(after, "%d") then return true end
-    init = a + 1
-  end
+  return msg and string.find(msg, "123", 1, true) and true or false
 end
 
 local function Short(text, n)
@@ -667,6 +660,7 @@ function M:Draw()
       if zone == "" then zone = "Elsewhere" end
       row.zone:SetText(Short(zone, 17))
       row.status:SetText(StateText(m))
+      if self.view123 then row.remove:Show() else row.remove:Hide() end
       if m.failed then
         row.tooltipText = "Left-click: target\nRight-click: summon\nLast summon failed: "
                           .. (m.failed.reason or "no response")
@@ -682,6 +676,7 @@ function M:Draw()
     else
       row.unit = nil
       row.member = nil
+      row.remove:Hide()
       row:Hide()
     end
   end
@@ -777,6 +772,26 @@ function M:OnLoad()
     row.status = row:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
     row.status:SetPoint("RIGHT", row, "RIGHT", -4, 0)
     row.status:SetJustifyH("RIGHT")
+
+    -- small x beside the name (123 list only): removes the member from the list
+    local x = CreateFrame("Button", nil, row)
+    x:SetWidth(16)
+    x:SetHeight(16)
+    x:SetPoint("LEFT", row, "RIGHT", 2, 0)
+    x.text = x:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    x.text:SetPoint("CENTER", x, "CENTER", 0, 0)
+    x.text:SetText("x")
+    x.text:SetTextColor(1, 0.3, 0.3)
+    x:SetScript("OnClick", function()
+      local m = this:GetParent().member
+      if m then
+        M.requests[m.name] = nil
+        M:Draw()
+      end
+    end)
+    WF:SetTooltip(x, "Remove from the 123 list")
+    x:Hide()
+    row.remove = x
 
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     row:SetScript("OnClick", function()
