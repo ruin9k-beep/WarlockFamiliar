@@ -6,6 +6,12 @@
     Summon target  - casts Ritual of Summoning on your current target
     Auto summon    - picks the member who most needs a summon and casts it
 
+  123 List       - shows only the members who typed "123" in chat (say, yell,
+                   party, raid or whisper) in the last 3 minutes, oldest first.
+                   Someone who was out of range or out of zone leaves the list
+                   when they come within 60 yards of you. Auto summon picks
+                   these members first.
+
   Clicking a member in the list targets them; right-clicking summons them.
 
   Dead members can never be summoned, by Auto summon or by hand. Auto summon
@@ -42,6 +48,8 @@ local MIN_YARDS, MAX_YARDS = 5, 200
 local RECENT_SECS = 90      -- a member summoned this recently is skipped by Auto summon
 local SUM_COOLDOWN = 30     -- seconds before the same target is announced again
 local FAIL_SECS = 60        -- Auto summon skips a member whose summon failed for this long
+local REQUEST_SECS = 180     -- a "123" request stays on the 123 list this long
+local CLOSE_YARDS = 60       -- a requester who comes this close leaves the 123 list
 local START_WAIT = 3        -- seconds to wait for a cast to start before calling it failed
 
 -- error texts that are NOT the target's fault (the target is not blamed)
@@ -86,12 +94,16 @@ local M = WF:RegisterModule("summon", {
   minLevel = 20,
   interval = 0.5,
   events = { "SPELLCAST_START", "SPELLCAST_CHANNEL_START", "SPELLCAST_CHANNEL_STOP",
-             "SPELLCAST_FAILED", "SPELLCAST_INTERRUPTED", "UI_ERROR_MESSAGE" },
+             "SPELLCAST_FAILED", "SPELLCAST_INTERRUPTED", "UI_ERROR_MESSAGE",
+             "CHAT_MSG_SAY", "CHAT_MSG_YELL", "CHAT_MSG_PARTY", "CHAT_MSG_RAID",
+             "CHAT_MSG_RAID_LEADER", "CHAT_MSG_WHISPER" },
 })
 
 M.rows = {}
 M.page = 1
 M.summoned = {}   -- name -> GetTime() of the last summon cast on them
+M.requests = {}   -- name -> { t = GetTime() of the last "123", needs = true/false/nil }
+M.view123 = false -- true: the list shows only the 123 requesters
 M.failed = {}     -- name -> { t = GetTime(), reason = text } of a summon that failed
 
 ----------------------------------------------------------------------
@@ -142,6 +154,20 @@ local function FindUnit(name)
   return nil
 end
 
+-- true when a chat line contains "123" as its own number (not part of 1234)
+local function HasRequest(msg)
+  if not msg then return false end
+  local init = 1
+  while true do
+    local a, b = string.find(msg, "123", init, true)
+    if not a then return false end
+    local before = a > 1 and string.sub(msg, a - 1, a - 1) or ""
+    local after = string.sub(msg, b + 1, b + 1)
+    if not string.find(before, "%d") and not string.find(after, "%d") then return true end
+    init = a + 1
+  end
+end
+
 local function Short(text, n)
   if not text then return "" end
   if string.len(text) > n then return string.sub(text, 1, n - 1) .. "." end
@@ -172,6 +198,13 @@ function M:MakeMember(name, unit, fileName, level, zone, online, dead, myZone)
       local idx = 4
       if radius <= 10 then idx = 3 elseif radius <= 20 then idx = 2 end
       m.near = CheckInteractDistance(unit, idx) and true or false
+    end
+    -- "close" for the 123 list: within 60 yards (exact with SuperWoW; without
+    -- it the best available check is the 28 yard interact distance)
+    if yards then
+      m.close = (yards <= CLOSE_YARDS)
+    else
+      m.close = CheckInteractDistance(unit, 4) and true or false
     end
     m.visible = UnitIsVisible(unit) and true or false
   end
@@ -259,13 +292,56 @@ function M:ScanGroup()
   return list
 end
 
+-- Brings the 123 requests up to date against the member list: expired
+-- requests, people who left the group, and people who were out of range or
+-- out of zone and are now within 60 yards are dropped.
+function M:UpdateRequests()
+  local byName = {}
+  for i = 1, table.getn(self.members) do
+    byName[self.members[i].name] = self.members[i]
+  end
+  local now = GetTime()
+  for name, r in pairs(self.requests) do
+    local m = byName[name]
+    if now - r.t > REQUEST_SECS or not m then
+      self.requests[name] = nil
+    elseif r.needs == nil then
+      -- first look since the request: only people who were out of range count
+      if m.close then
+        self.requests[name] = nil
+      else
+        r.needs = true
+      end
+    elseif m.close then
+      self.requests[name] = nil
+    end
+  end
+end
+
 function M:Scan()
   if WF:Due(self, "tSlow", 2) or not self.shards then
     self.shards = WF:CountItemId(SHARD_ID)
   end
   if WF:Due(self, "tGroup", 1) or not self.members then
     self.members = self:ScanGroup()
+    self:UpdateRequests()
   end
+end
+
+-- the members on the 123 list, oldest request first
+function M:Requesters()
+  local out = {}
+  if not self.members then return out end
+  for i = 1, table.getn(self.members) do
+    local m = self.members[i]
+    local r = self.requests[m.name]
+    if r and r.needs then
+      m.requestT = r.t
+      table.insert(out, m)
+    end
+  end
+  table.sort(out, function(a, b) return a.requestT < b.requestT end)
+  return out
 end
 
 ----------------------------------------------------------------------
@@ -379,6 +455,9 @@ function M:PickAuto()
         if m.visible then far = 60 else far = 1000 end
       end
       local key = tier * 100000 - far
+      -- members who typed 123 go first (oldest request first)
+      local r = self.requests[m.name]
+      if r and r.needs then key = key - 10000000 + (GetTime() - r.t) * -1 end
       if not bestKey or key < bestKey then
         best, bestKey = m, key
       end
@@ -487,7 +566,23 @@ function M:CheckAttempt()
 end
 
 function M:OnEvent(event, a1, a2)
-  if event == "SPELLCAST_START" then
+  if string.sub(event, 1, 9) == "CHAT_MSG_" then
+    -- a group member typed "123": they want a summon
+    if a2 and a2 ~= UnitName("player") and HasRequest(a1) and FindUnit(a2) then
+      if WF:Due(self, "tChat", 1) or not self.members then
+        self.members = self:ScanGroup()   -- fresh positions for the first look
+      end
+      local r = self.requests[a2]
+      if not r then
+        r = {}
+        self.requests[a2] = r
+      end
+      r.t = GetTime()
+      r.needs = nil
+      self:UpdateRequests()
+      if self.frame and self.frame:IsVisible() then self:Draw() end
+    end
+  elseif event == "SPELLCAST_START" then
     if a1 == SUM_SPELL then
       self.castingAt = GetTime()
       self.attempt = nil          -- it started: not a failure
@@ -547,6 +642,7 @@ function M:Draw()
   if not self.frame or not self.members then return end
 
   local list = self.members
+  if self.view123 then list = self:Requesters() end
   local n = table.getn(list)
   local pages = math.ceil(n / PAGE_SIZE)
   if pages < 1 then pages = 1 end
@@ -591,10 +687,25 @@ function M:Draw()
   end
 
   if n == 0 then
+    if self.view123 then
+      self.emptyText:SetText("Nobody has asked for a summon (123) lately.")
+    else
+      self.emptyText:SetText("Join a party or raid to see members here.")
+    end
     self.emptyText:Show()
   else
     self.emptyText:Hide()
   end
+
+  -- the 123 button: green while that list is showing, with the request count
+  local waiting = 0
+  for name, r in pairs(self.requests) do
+    if r.needs then waiting = waiting + 1 end
+  end
+  local label = "123 List"
+  if waiting > 0 then label = label .. " (" .. waiting .. ")" end
+  if self.view123 then label = "|cff40ff40" .. label .. "|r" end
+  self.listBtn:SetText(label)
 
   self.pageText:SetText("Page " .. self.page .. "/" .. pages .. "  (" .. n .. ")")
   if self.page > 1 then self.prevBtn:Enable() else self.prevBtn:Disable() end
@@ -634,7 +745,7 @@ function M:OnLoad()
     end
   end
 
-  local height = ROW_TOP + PAGE_SIZE * ROW_H + 82
+  local height = ROW_TOP + PAGE_SIZE * ROW_H + 108
   local f = WF:CreateWindow(self, 0, height)
 
   self.emptyText = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
@@ -714,8 +825,18 @@ function M:OnLoad()
   autoBtn:SetScript("OnClick", function() M:AutoSummon() end)
   WF:SetTooltip(autoBtn, "Summon the member who most needs it: living members in another zone first, then far away members in your zone.\nSkips dead and offline members, members in instances, near members and members summoned a moment ago.")
 
+  -- 123 priority: only the members who typed "123" in chat in the last 3 minutes
+  self.listBtn = WF:CreateButton(f, "123 List", 254, 22)
+  self.listBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 23, -(btnY + 26))
+  self.listBtn:SetScript("OnClick", function()
+    M.view123 = not M.view123
+    M.page = 1
+    M:Draw()
+  end)
+  WF:SetTooltip(self.listBtn, "Show only members who typed 123 in chat in the last 3 minutes (oldest first).\nThey leave the list when they come within 60 yards of you.\nAuto summon picks these members first.")
+
   self.info = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-  self.info:SetPoint("TOP", f, "TOP", 0, -(btnY + 28))
+  self.info:SetPoint("TOP", f, "TOP", 0, -(btnY + 54))
 
   f:SetScript("OnShow", function() M:Refresh() end)
 end
