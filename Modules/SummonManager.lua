@@ -14,6 +14,12 @@
                    when they come within 60 yards of you. Auto summon picks
                    these members first.
 
+  Auto 123       - when on, the addon targets and summons the members on the
+                   123 list by itself, oldest request first. Each ritual is
+                   held for 10 seconds (changeable in the Summon options) and
+                   then the next member is summoned. A ritual that finishes
+                   sooner moves on at once. It pauses in combat.
+
   Clicking a member in the list targets them; right-clicking summons them.
 
   Dead members can never be summoned, by Auto summon or by hand. Auto summon
@@ -32,6 +38,7 @@
 
   /wf summon                 show / hide the window
   /wf summon auto            summon the member who most needs it
+  /wf summon 123 [on|off]    turn 123 auto summon on or off
   /wf summon target          summon your current target
   /wf summon ignore <zone>   treat a zone as an instance (members there are skipped)
   /wf summon unignore <zone>
@@ -52,6 +59,9 @@ local SUM_COOLDOWN = 30     -- seconds before the same target is announced again
 local FAIL_SECS = 60        -- Auto summon skips a member whose summon failed for this long
 local REQUEST_SECS = 180     -- a "123" request stays on the 123 list this long
 local CLOSE_YARDS = 60       -- a requester who comes this close leaves the 123 list
+local HOLD_SECS = 10         -- 123 auto summon: seconds a ritual is held before the next member
+local MIN_HOLD, MAX_HOLD = 3, 60
+local RETRY_SECS = 3         -- 123 auto summon: pause after a cast that could not start
 local START_WAIT = 3        -- seconds to wait for a cast to start before calling it failed
 
 -- error texts that are NOT the target's fault (the target is not blamed)
@@ -475,6 +485,74 @@ function M:AutoSummon()
 end
 
 ----------------------------------------------------------------------
+-- 123 auto summon: the addon summons the members on the 123 list, one at a
+-- time, oldest request first. Each ritual is held for the hold time (10
+-- seconds by default) and then stopped so the next member can be summoned.
+-- A ritual that finishes sooner (people clicked the portal) moves on at once.
+----------------------------------------------------------------------
+-- called when a Ritual of Summoning starts: the hold time runs from here
+function M:StartHold()
+  local now = GetTime()
+  if not self.holdUntil or now > self.holdUntil then
+    self.holdUntil = now + (self.db.holdSecs or HOLD_SECS)
+  end
+end
+
+-- the next member on the 123 list who can be summoned right now
+function M:NextRequester()
+  local list = self:Requesters()
+  for i = 1, table.getn(list) do
+    local m = list[i]
+    if (m.state == "away" or m.state == "far") and not m.recent and not m.failed then
+      return m
+    end
+  end
+  return nil
+end
+
+function M:SetAuto123(on)
+  self.db.auto123 = on and true or false
+  self.autoCast = nil
+  self.autoRetryAt = nil
+  WF:Print("123 auto summon " .. (on and "on." or "off."))
+  if self.frame and self.frame:IsVisible() then self:Draw() end
+end
+
+-- runs every update (also with the window closed or collapsed)
+function M:AutoTick()
+  if not self.db.auto123 then return end
+  if GetNumRaidMembers() == 0 and GetNumPartyMembers() == 0 then return end
+  if UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") then return end
+  if self.attempt then return end                       -- waiting for a cast to start
+  local now = GetTime()
+  if self.autoRetryAt and now < self.autoRetryAt then return end
+  if not self.members or WF:Due(self, "tAutoScan", 1) then
+    self.members = self:ScanGroup()
+    self:UpdateRequests()
+  end
+
+  if self:Busy() then
+    -- a ritual is up: hold it for the hold time, then let go if somebody is waiting
+    if self.autoCast and self.holdUntil and now >= self.holdUntil and self:NextRequester() then
+      SpellStopCasting()
+      self.channeling = nil
+      self.castingAt = nil
+      self.autoCast = nil
+    end
+    return
+  end
+  self.autoCast = nil
+
+  local m = self:NextRequester()
+  if not m then return end
+  self.autoRetryAt = now + RETRY_SECS
+  if self:CastSummon(m) then
+    self.autoCast = m.name
+    WF:Print("123: summoning " .. m.name .. ".")
+  end
+end
+
+----------------------------------------------------------------------
 -- announcements (Ritual of Summoning started)
 ----------------------------------------------------------------------
 function M:Announce()
@@ -577,12 +655,14 @@ function M:OnEvent(event, a1, a2)
     end
   elseif event == "SPELLCAST_START" then
     if a1 == SUM_SPELL then
+      self:StartHold()
       self.castingAt = GetTime()
       self.attempt = nil          -- it started: not a failure
       self:Announce()
     end
   elseif event == "SPELLCAST_CHANNEL_START" then
     if a2 == SUM_SPELL then
+      self:StartHold()
       self.channeling = GetTime()
       self.attempt = nil
       self:Announce()
@@ -701,6 +781,11 @@ function M:Draw()
   if waiting > 0 then label = label .. " (" .. waiting .. ")" end
   if self.view123 then label = "|cff40ff40" .. label .. "|r" end
   self.listBtn:SetText(label)
+  if self.db.auto123 then
+    self.autoToggle:SetText("|cff40ff40Auto 123: On|r")
+  else
+    self.autoToggle:SetText("Auto 123: Off")
+  end
 
   self.pageText:SetText("Page " .. self.page .. "/" .. pages .. "  (" .. n .. ")")
   if self.page > 1 then self.prevBtn:Enable() else self.prevBtn:Disable() end
@@ -841,7 +926,7 @@ function M:OnLoad()
   WF:SetTooltip(autoBtn, "Summon the member who most needs it: living members in another zone first, then far away members in your zone.\nSkips dead and offline members, members in instances, near members and members summoned a moment ago.")
 
   -- 123 priority: only the members who typed "123" in chat in the last 3 minutes
-  self.listBtn = WF:CreateButton(f, "123 List", 254, 22)
+  self.listBtn = WF:CreateButton(f, "123 List", 124, 22)
   self.listBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 23, -(btnY + 26))
   self.listBtn:SetScript("OnClick", function()
     M.view123 = not M.view123
@@ -849,6 +934,12 @@ function M:OnLoad()
     M:Draw()
   end)
   WF:SetTooltip(self.listBtn, "Show only members who typed 123 in chat in the last 3 minutes (oldest first).\nThey leave the list when they come within 60 yards of you.\nAuto summon picks these members first.")
+
+  -- 123 auto summon on / off
+  self.autoToggle = WF:CreateButton(f, "Auto 123", 124, 22)
+  self.autoToggle:SetPoint("TOPRIGHT", f, "TOPRIGHT", -23, -(btnY + 26))
+  self.autoToggle:SetScript("OnClick", function() M:SetAuto123(not M.db.auto123) end)
+  WF:SetTooltip(self.autoToggle, "123 auto summon: targets and summons the members on the 123 list one after another, oldest request first.\nEach ritual is held for the hold time (Summon options, 10 seconds by default), then the next member is summoned.\nPauses in combat.")
 
   self.info = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
   self.info:SetPoint("TOP", f, "TOP", 0, -(btnY + 54))
@@ -858,6 +949,7 @@ end
 
 function M:OnUpdate()
   self:CheckAttempt()
+  self:AutoTick()
   if self.frame and self.frame:IsVisible() then
     self:Refresh()
   end
@@ -868,6 +960,7 @@ function M:OnDisable()
   self.castingAt = nil
   self.pending = nil
   self.attempt = nil
+  self.autoCast = nil
 end
 
 ----------------------------------------------------------------------
@@ -908,6 +1001,29 @@ function M:OptionsSummon(parent, y)
   radiusHelp:SetText("Default " .. NEAR_YARDS .. ", " .. MIN_YARDS .. "-" .. MAX_YARDS ..
                      ". Exact only with SuperWoW; otherwise about 10, 11 or 28 yards are used.")
   y = y + 30
+
+  y = WF:AddHeading(parent, y + 4, "123 auto summon")
+  y = WF:AddCheck(parent, y, "Summon members who type 123 automatically",
+    function() return M.db.auto123 == true end,
+    function(on) M:SetAuto123(on) end)
+  local holdLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  holdLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, -(y + 8))
+  holdLabel:SetText("Hold each ritual for (seconds):")
+  local holdBox = WF:AddEditBox(parent, 214, y + 2, 50)
+  holdBox:SetMaxLetters(2)
+  holdBox:SetText(tostring(M.db.holdSecs or HOLD_SECS))
+  holdBox:SetScript("OnTextChanged", function()
+    local n = tonumber(this:GetText())
+    if n then
+      if n < MIN_HOLD then n = MIN_HOLD end
+      if n > MAX_HOLD then n = MAX_HOLD end
+      M.db.holdSecs = math.floor(n)
+    end
+  end)
+  holdBox:SetScript("OnEditFocusLost", function()
+    this:SetText(tostring(M.db.holdSecs or HOLD_SECS))
+  end)
+  y = y + 32
 
   y = WF:AddHeading(parent, y + 4, "Announcements")
   y = WF:AddCheck(parent, y, "Announce Ritual of Summoning in /say",
@@ -967,6 +1083,11 @@ function M:OnSlash(args)
 
   if cmd == "auto" then
     self:AutoSummon()
+  elseif cmd == "123" then
+    local a = string.lower(rest or "")
+    if a == "on" then self:SetAuto123(true)
+    elseif a == "off" then self:SetAuto123(false)
+    else self:SetAuto123(not self.db.auto123) end
   elseif cmd == "target" or cmd == "summon" then
     self:SummonTarget()
   elseif cmd == "ignore" and rest ~= "" then
@@ -986,6 +1107,6 @@ function M:OnSlash(args)
     end
     if not any then WF:Print("No custom ignored zones.") end
   else
-    WF:Print("Summon Manager: auto | target | ignore <zone> | unignore <zone> | list")
+    WF:Print("Summon Manager: auto | 123 [on|off] | target | ignore <zone> | unignore <zone> | list")
   end
 end
