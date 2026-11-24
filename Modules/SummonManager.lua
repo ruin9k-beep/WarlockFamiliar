@@ -16,9 +16,8 @@
 
   Auto 123       - when on, the addon targets and summons the members on the
                    123 list by itself, oldest request first. Each ritual is
-                   held for 10 seconds (changeable in the Summon options) and
-                   then the next member is summoned. A ritual that finishes
-                   sooner moves on at once. It pauses in combat.
+                   held for 10 seconds from its start (changeable in the Summon options) and
+                   then the next member is summoned. It pauses in combat.
 
   Clicking a member in the list targets them; right-clicking summons them.
 
@@ -39,6 +38,7 @@
   /wf summon                 show / hide the window
   /wf summon auto            summon the member who most needs it
   /wf summon 123 [on|off]    turn 123 auto summon on or off
+  /wf summon 123 status      show the 123 list and why nobody is being summoned
   /wf summon target          summon your current target
   /wf summon ignore <zone>   treat a zone as an instance (members there are skipped)
   /wf summon unignore <zone>
@@ -414,6 +414,10 @@ function M:CastSummon(m, token)
 
   CastSpellByName(SUM_SPELL)
   if SpellIsTargeting() then SpellTargetUnit(m.unit) end
+  -- the cast is on its way: they count as summoned now, and nothing waits for
+  -- the game to answer (an error message, if any, still marks them failed)
+  self.summoned[m.name] = GetTime()
+  self.holdUntil = GetTime() + (self.db.holdSecs or HOLD_SECS)
   return true
 end
 
@@ -518,12 +522,32 @@ function M:SetAuto123(on)
   if self.frame and self.frame:IsVisible() then self:Draw() end
 end
 
+-- one line per reason, at most once every 10 seconds, so a silent failure
+-- explains itself without flooding the chat
+function M:AutoSay(text)
+  local now = GetTime()
+  if self.autoSaid ~= text or not self.autoSaidAt or now - self.autoSaidAt > 10 then
+    self.autoSaid, self.autoSaidAt = text, now
+    WF:Print("123: " .. text)
+  end
+end
+
+-- why nobody on the list can be summoned right now
+local function WhyNot(m)
+  if m.dead then return "dead" end
+  if not m.online then return "offline" end
+  if m.instance then return "in an instance" end
+  if m.recent then return "summoned a moment ago" end
+  if m.failed then return "last summon failed" end
+  if m.state == "near" then return "near you" end
+  return m.state
+end
+
 -- runs every update (also with the window closed or collapsed)
 function M:AutoTick()
   if not self.db.auto123 then return end
   if GetNumRaidMembers() == 0 and GetNumPartyMembers() == 0 then return end
   if UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") then return end
-  if self.attempt then return end                       -- waiting for a cast to start
   local now = GetTime()
   if self.autoRetryAt and now < self.autoRetryAt then return end
   if not self.members or WF:Due(self, "tAutoScan", 1) then
@@ -531,25 +555,54 @@ function M:AutoTick()
     self:UpdateRequests()
   end
 
+  -- the hold: after a ritual starts, nothing new is started until the hold
+  -- time is over; a ritual that is still going then gets stopped
+  if self.holdUntil and now < self.holdUntil then return end
   if self:Busy() then
-    -- a ritual is up: hold it for the hold time, then let go if somebody is waiting
-    if self.autoCast and self.holdUntil and now >= self.holdUntil and self:NextRequester() then
+    if self:NextRequester() then
       SpellStopCasting()
       self.channeling = nil
       self.castingAt = nil
-      self.autoCast = nil
+    else
+      return
+    end
+  end
+
+  local m = self:NextRequester()
+  if not m then
+    local list = self:Requesters()
+    if table.getn(list) > 0 then
+      self:AutoSay(list[1].name .. " cannot be summoned: " .. WhyNot(list[1]) .. ".")
     end
     return
   end
-  self.autoCast = nil
-
-  local m = self:NextRequester()
-  if not m then return end
   self.autoRetryAt = now + RETRY_SECS
   if self:CastSummon(m) then
-    self.autoCast = m.name
     WF:Print("123: summoning " .. m.name .. ".")
+  else
+    self:AutoSay("could not start the summon on " .. m.name .. ".")
   end
+end
+
+-- /wf summon 123 status
+function M:AutoStatus()
+  WF:Print("123 auto summon is " .. (self.db.auto123 and "on" or "off") ..
+           ", hold " .. (self.db.holdSecs or HOLD_SECS) .. "s.")
+  local n = 0
+  for name, r in pairs(self.requests) do
+    n = n + 1
+    local m
+    for i = 1, table.getn(self.members or {}) do
+      if self.members[i].name == name then m = self.members[i] end
+    end
+    WF:Print("  " .. name .. ": asked " .. math.floor(GetTime() - r.t) .. "s ago, " ..
+             (r.needs and "waiting" or "not waiting") ..
+             (m and (", " .. WhyNot(m)) or ", not in group"))
+  end
+  if n == 0 then WF:Print("  Nobody on the 123 list.") end
+  WF:Print("  combat: " .. (UnitAffectingCombat("player") and "yes" or "no") ..
+           ", ritual busy: " .. (self:Busy() and "yes" or "no") ..
+           ", shards: " .. WF:CountItemId(SHARD_ID))
 end
 
 ----------------------------------------------------------------------
@@ -612,6 +665,8 @@ function M:MarkFailed(reason)
   if not a then return end
   self.attempt = nil
   self.pending = nil
+  self.summoned[a.name] = nil
+  self.holdUntil = nil
   self.failed[a.name] = { t = GetTime(), reason = reason }
   local why = ""
   if reason and reason ~= "" then why = ": " .. reason end
@@ -628,11 +683,13 @@ local function IsNotTargetError(msg)
   return false
 end
 
--- called every update: a cast that never started counts as failed
+-- called every update: the game does not have to answer a cast. An error
+-- message right after the click marks the member failed (see OnEvent);
+-- silence just ends the wait.
 function M:CheckAttempt()
   local a = self.attempt
   if a and GetTime() - a.t > START_WAIT then
-    self:MarkFailed("no response")
+    self.attempt = nil
   end
 end
 
@@ -1085,7 +1142,8 @@ function M:OnSlash(args)
     self:AutoSummon()
   elseif cmd == "123" then
     local a = string.lower(rest or "")
-    if a == "on" then self:SetAuto123(true)
+    if a == "status" then self:AutoStatus()
+    elseif a == "on" then self:SetAuto123(true)
     elseif a == "off" then self:SetAuto123(false)
     else self:SetAuto123(not self.db.auto123) end
   elseif cmd == "target" or cmd == "summon" then
