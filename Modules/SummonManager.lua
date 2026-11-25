@@ -108,7 +108,7 @@ local M = WF:RegisterModule("summon", {
   events = { "SPELLCAST_START", "SPELLCAST_CHANNEL_START", "SPELLCAST_CHANNEL_STOP",
              "SPELLCAST_FAILED", "SPELLCAST_INTERRUPTED", "UI_ERROR_MESSAGE",
              "CHAT_MSG_SAY", "CHAT_MSG_YELL", "CHAT_MSG_PARTY", "CHAT_MSG_RAID",
-             "CHAT_MSG_RAID_LEADER", "CHAT_MSG_WHISPER" },
+             "CHAT_MSG_RAID_LEADER", "CHAT_MSG_WHISPER", "PLAYER_TARGET_CHANGED" },
 })
 
 M.rows = {}
@@ -298,6 +298,11 @@ end
 -- Brings the 123 requests up to date against the member list: expired
 -- requests, people who left the group, and people who were out of range or
 -- out of zone and are now within 60 yards are dropped.
+-- a short line in chat about what the 123 list is doing (only while auto 123 is on)
+function M:Note(text)
+  if self.db.auto123 then WF:Print("123: " .. text) end
+end
+
 function M:UpdateRequests()
   local byName = {}
   for i = 1, table.getn(self.members) do
@@ -308,15 +313,19 @@ function M:UpdateRequests()
     local m = byName[name]
     if now - r.t > REQUEST_SECS or not m then
       self.requests[name] = nil
+      self:Note(name .. " left the 123 list (" .. (m and "expired" or "not in your group") .. ").")
     elseif r.needs == nil then
       -- first look since the request: only people who were out of range count
       if m.close then
         self.requests[name] = nil
+        self:Note(name .. " is already close (within " .. CLOSE_YARDS .. " yards): not listed.")
       else
         r.needs = true
+        self:Note(name .. " asked for a summon (" .. (m.zone ~= "" and m.zone or "elsewhere") .. ").")
       end
     elseif m.close then
       self.requests[name] = nil
+      self:Note(name .. " arrived: removed from the 123 list.")
     end
   end
 end
@@ -417,6 +426,7 @@ function M:CastSummon(m, token)
   -- the cast is on its way: they count as summoned now, and nothing waits for
   -- the game to answer (an error message, if any, still marks them failed)
   self.summoned[m.name] = GetTime()
+  self.castTarget = m.name      -- must stay targeted until the next summon
   self.holdUntil = GetTime() + (self.db.holdSecs or HOLD_SECS)
   return true
 end
@@ -476,10 +486,21 @@ end
 -- "Auto summon" button
 function M:AutoSummon()
   self.members = self:ScanGroup()
-  local m = self:PickAuto()
-  if not m then
-    WF:Print("Nobody needs a summon.")
-    return
+  self:UpdateRequests()
+  local m
+  if self.view123 then
+    -- the 123 list is showing: only its members are summoned
+    m = self:NextRequester()
+    if not m then
+      WF:Print("Nobody on the 123 list can be summoned right now.")
+      return
+    end
+  else
+    m = self:PickAuto()
+    if not m then
+      WF:Print("Nobody needs a summon.")
+      return
+    end
   end
   local where = m.zone
   if where == "" then where = "elsewhere" end
@@ -694,6 +715,10 @@ function M:CheckAttempt()
 end
 
 function M:OnEvent(event, a1, a2)
+  if string.sub(event, 1, 9) == "CHAT_MSG_" and a2 and a2 ~= UnitName("player")
+     and HasRequest(a1) and not FindUnit(a2) then
+    self:Note(a2 .. " typed 123 but is not in your group.")
+  end
   if string.sub(event, 1, 9) == "CHAT_MSG_" then
     -- a group member typed "123": they want a summon
     if a2 and a2 ~= UnitName("player") and HasRequest(a1) and FindUnit(a2) then
@@ -710,6 +735,14 @@ function M:OnEvent(event, a1, a2)
       self:UpdateRequests()
       if self.frame and self.frame:IsVisible() then self:Draw() end
     end
+  elseif event == "PLAYER_TARGET_CHANGED" then
+    -- the summoned member has to stay targeted until the next summon starts
+    local want = self.castTarget
+    if self.db.auto123 and want and self.holdUntil and GetTime() < self.holdUntil + 30
+       and UnitName("target") ~= want then
+      WF:Print("123: your target changed to " .. (UnitName("target") or "nothing")
+               .. " while " .. want .. " was being summoned.")
+    end
   elseif event == "SPELLCAST_START" then
     if a1 == SUM_SPELL then
       self:StartHold()
@@ -725,6 +758,9 @@ function M:OnEvent(event, a1, a2)
       self:Announce()
     end
   elseif event == "UI_ERROR_MESSAGE" then
+    if self.db.auto123 and self.holdUntil and GetTime() < self.holdUntil + 5 then
+      WF:Print("123: game message: " .. tostring(a1))
+    end
     -- an error right after our click: blame the target unless the text says
     -- the problem is something else (mana, cooldown, movement...)
     local a = self.attempt
@@ -740,6 +776,9 @@ function M:OnEvent(event, a1, a2)
     self.channeling = nil
     self.castingAt = nil
   elseif event == "SPELLCAST_INTERRUPTED" then
+    if self.db.auto123 and self.castTarget and self.holdUntil and GetTime() < self.holdUntil + 30 then
+      WF:Print("123: the ritual on " .. self.castTarget .. " was interrupted.")
+    end
     self.channeling = nil
     self.castingAt = nil
   elseif event == "SPELLCAST_FAILED" then
@@ -980,7 +1019,7 @@ function M:OnLoad()
   local autoBtn = WF:CreateButton(f, "Auto summon", 124, 22)
   autoBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -23, -btnY)
   autoBtn:SetScript("OnClick", function() M:AutoSummon() end)
-  WF:SetTooltip(autoBtn, "Summon the member who most needs it: living members in another zone first, then far away members in your zone.\nSkips dead and offline members, members in instances, near members and members summoned a moment ago.")
+  WF:SetTooltip(autoBtn, "Summon the member who most needs it: living members in another zone first, then far away members in your zone.\nSkips dead and offline members, members in instances, near members and members summoned a moment ago.\nWhile the 123 list is showing, only members on that list are summoned.")
 
   -- 123 priority: only the members who typed "123" in chat in the last 3 minutes
   self.listBtn = WF:CreateButton(f, "123 List", 124, 22)
@@ -1006,7 +1045,8 @@ end
 
 function M:OnUpdate()
   self:CheckAttempt()
-  self:AutoTick()
+  local ok, err = pcall(self.AutoTick, self)
+  if not ok then self:AutoSay("error: " .. tostring(err)) end
   if self.frame and self.frame:IsVisible() then
     self:Refresh()
   end
